@@ -1,4 +1,12 @@
-# 柏宝绘 · SillyTavern 剧情配图助手
+> [!WARNING]
+> **个人自用魔改版 · 非官方项目**
+>
+> 本仓库基于原作者 **柏柏** 的开源项目二次修改，仅供本人自用，**不代表原作者立场，也不提供官方支持与更新**。
+> 原项目：**柏宝绘** → <https://github.com/baibai-git/ST-BaiBai-Image>
+
+---
+
+# 柏宝绘（个人魔改版）· SillyTavern 剧情配图助手
 
 > 让 AI 的每一段精彩剧情都有画面。柏宝绘会一边陪你聊，一边默默判断「这一幕值不值得画」，自动挑选最值得定格的瞬间、写好生图提示词，再交给出图渠道生成图片，直接嵌进楼层里。全程自动，也可随时手动接管。
 
@@ -58,7 +66,7 @@
 在 SillyTavern 的「扩展 → 安装扩展」里填入本仓库地址即可：
 
 ```
-https://github.com/baibai-git/ST-BaiBai-Image
+https://github.com/laolu237-oss/HUITU
 ```
 
 安装后进入「设置」页：先到「渠道」页配置出图渠道（本地 ComfyUI 或 NovelAI 账号），再确认「自动生成 tag」开关已打开，就可以开始自动配图了。设置会随 SillyTavern 保存在服务器，跨设备自动同步。
@@ -87,4 +95,5 @@ https://github.com/baibai-git/ST-BaiBai-Image
 
 ---
 
-作者：柏柏 · 欢迎反馈与建议。
+**原项目**：[柏宝绘](https://github.com/baibai-git/ST-BaiBai-Image) · 作者 **柏柏**
+**本仓库**：个人自用魔改版（laolu237-oss 维护）· 非官方，不提供支持与更新

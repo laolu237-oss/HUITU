@@ -4,7 +4,7 @@
   "requires": [],
   "optional": [],
   "js": "dist/index.js?ver=0.3.9",
-  "author": "柏柏",
+  "author": "柏柏（laolu237-oss 魔改）",
   "version": "0.3.9",
   "homePage": "https://github.com/laolu237-oss/HUITU",
   "auto_update": false,
