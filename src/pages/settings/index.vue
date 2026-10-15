@@ -23,6 +23,7 @@ import {
   type ImageDisplaySize,
 } from '@/state/settings';
 import { getContext } from '@/st/context';
+import { downloadTransferFile, importTransferFile } from '@/state/configTransfer';
 import {
   ORB_SHAPES,
   THEMES,
@@ -505,6 +506,55 @@ async function confirmUpdate() {
     toastr?.error?.(`更新失败:${error instanceof Error ? error.message : String(error)}`, '柏宝绘');
   }
 }
+
+/* —— 配置导入导出:整机设置备份/迁移。副 API(渠道 + 生成 tag 指派)不参与,见 state/configTransfer.ts —— */
+const transferBusy = ref(false);
+const transferMsg = ref('');
+const transferError = ref(false);
+const importFileInput = ref<HTMLInputElement | null>(null);
+// 选完文件不直接应用:先过确认弹窗(覆盖性操作,给一次后悔机会),确认后才真正导入
+const importConfirmOpen = ref(false);
+const pendingFile = ref<File | null>(null);
+
+function doExportConfig() {
+  try {
+    downloadTransferFile(updateState.current);
+    transferError.value = false;
+    transferMsg.value = '已导出配置文件(不含副 API)。';
+  } catch (error) {
+    transferError.value = true;
+    transferMsg.value = `导出失败:${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+function pickImportFile() {
+  transferMsg.value = '';
+  importFileInput.value?.click();
+}
+function onImportFile(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = ''; // 复位,允许重复选同一文件
+  if (!file) return;
+  pendingFile.value = file;
+  importConfirmOpen.value = true;
+}
+function cancelImport() {
+  pendingFile.value = null;
+}
+async function confirmImport() {
+  const file = pendingFile.value;
+  pendingFile.value = null;
+  if (!file) return;
+  transferBusy.value = true;
+  transferMsg.value = '';
+  try {
+    const r = await importTransferFile(file);
+    transferError.value = !r.ok;
+    transferMsg.value = r.ok ? r.message : r.error;
+  } finally {
+    transferBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -865,6 +915,36 @@ async function confirmUpdate() {
           </li>
         </ul>
       </Collapsible>
+
+      <!-- 配置导入导出:整机设置备份/迁移。副 API(渠道 + 指派)不随文件走 -->
+      <Collapsible title="配置导入导出" :open="false">
+        <p class="bbi-field-hint">
+          <strong>导出</strong>:把当前设置(基本设置、出图后端、自动生成 tag、排除名单、自定义提示词等)下载为 JSON
+          备份文件,可用于换设备、换账户或重置前存档。<strong>副 API(渠道与生成 tag 指派)不进入导出文件</strong>
+          ——渠道由酒馆扩展设置跨设备同步,且与柏宝书共用同一份,不随配置文件走。
+        </p>
+        <p class="bbi-field-hint">
+          <strong>导入</strong>:选择此前导出的文件,文件中有的设置项才会覆盖当前值,缺少的项保持当前值不变;
+          副 API 渠道与指派同样不受影响。文件中含 NAI 接入点密钥等敏感信息,请妥善保管,勿外传。
+        </p>
+        <div class="bbi-transfer-bar">
+          <button class="bbi-btn bbi-btn-primary" type="button" @click="doExportConfig">
+            <Icon name="download" /> 导出配置
+          </button>
+          <button class="bbi-btn" type="button" :disabled="transferBusy" @click="pickImportFile">
+            <Icon name="upload" /> 导入配置
+          </button>
+          <!-- 隐藏的原生文件选择:点「导入配置」触发,选完即复位(可重复选同一文件) -->
+          <input
+            ref="importFileInput"
+            class="bbi-transfer-input"
+            type="file"
+            accept=".json,application/json"
+            @change="onImportFile"
+          />
+        </div>
+        <p v-if="transferMsg" class="bbi-field-hint" :class="{ 'is-error': transferError }">{{ transferMsg }}</p>
+      </Collapsible>
     </div>
 
     <!-- ===== 排除角色弹窗:搜索 + 勾选列表 ===== -->
@@ -1151,6 +1231,20 @@ async function confirmUpdate() {
     >
       当前版本 v{{ updateState.current || '—' }},最新版本 v{{ updateState.latest }}。<br />
       现在更新吗?更新完成后会自动刷新页面生效。
+    </ConfirmDialog>
+
+    <!-- 导入配置二次确认:覆盖性操作,确认前让用户看清影响范围 -->
+    <ConfirmDialog
+      v-model:open="importConfirmOpen"
+      title="导入配置"
+      confirm-text="导入"
+      confirm-icon="upload"
+      tone="primary"
+      @confirm="confirmImport"
+      @cancel="cancelImport"
+    >
+      将用所选文件<b>{{ pendingFile?.name || '' }}</b>中的设置覆盖当前设置(文件中没有的项保持当前值)。<br />
+      副 API 渠道与生成 tag 指派不受影响。确定导入吗?
     </ConfirmDialog>
   </section>
 </template>
@@ -1579,6 +1673,21 @@ async function confirmUpdate() {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   tab-size: 2;
+}
+
+/* —— 配置导入导出:按钮横排 + 隐藏的原生文件选择 —— */
+.bbi-transfer-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.bbi-transfer-input {
+  display: none;
+}
+/* 操作结果提示:出错时转危险色(成功用常规墨色,避免绿色撞「跌」的歧义) */
+.bbi-field-hint.is-error {
+  color: var(--bbi-danger);
 }
 
 /* ============ 排除名单(chips + 弹窗列表):与柏宝书同款交互,类名换 bbi 前缀 ============ */
