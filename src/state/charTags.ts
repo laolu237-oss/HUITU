@@ -72,6 +72,25 @@ export interface CharTagChangeRecord {
   at: number;
 }
 
+/**
+ * 角色专属 LoRA 绑定。
+ *
+ * 为什么挂在角色而不是渠道:角色 LoRA 只在该角色**出现在画面里**时才有意义。
+ * 全挂在渠道里会让同框的每个角色互相污染(白发角色莫名带上紫发特征),
+ * 动态挂载要解决的就是这件事。
+ *
+ * 仅 ComfyUI「简易参数」模式生效:自定义工作流的节点是用户自己连的,
+ * 插件无法安全地往里插 LoRA 节点。
+ */
+export interface CharTagLora {
+  /** LoRA 文件名(相对 models/loras);空串/缺省 = 未绑定。 */
+  name: string;
+  /** 强度,默认 1,夹在 0–2 之间。 */
+  strength: number;
+  /** 触发词:挂载该 LoRA 时拼进正向提示词最前面;可空。 */
+  trigger: string;
+}
+
 export interface CharTagEntry {
   name: string;
   fields: Record<CharTagField, string>;
@@ -80,6 +99,8 @@ export interface CharTagEntry {
   source: CharTagSource;
   desc: string;
   history: CharTagChangeRecord[];
+  /** 角色专属 LoRA(可空);AI 永远不会写它,只由用户在角色管理页维护。 */
+  lora?: CharTagLora;
 }
 
 export interface CharTagNewOp {
@@ -237,6 +258,23 @@ function normalizeFields(raw: unknown): Record<CharTagField, string> {
   return fields;
 }
 
+/** LoRA 绑定的宽容归一:名字为空即视为未绑定;强度缺省 1,夹在 0–2。 */
+function normalizeLora(raw: unknown): CharTagLora | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as Partial<CharTagLora>;
+  const name = typeof value.name === 'string' ? value.name.trim() : '';
+  if (!name) return undefined;
+  const strength =
+    typeof value.strength === 'number' && Number.isFinite(value.strength)
+      ? Math.min(2, Math.max(0, value.strength))
+      : 1;
+  return {
+    name,
+    strength,
+    trigger: typeof value.trigger === 'string' ? value.trigger.trim() : '',
+  };
+}
+
 function normalizeEntry(raw: unknown): CharTagEntry | null {
   if (!raw || typeof raw !== 'object') return null;
   const value = raw as Partial<CharTagEntry> & { tags?: unknown };
@@ -254,6 +292,7 @@ function normalizeEntry(raw: unknown): CharTagEntry | null {
     source: value.source === 'book' || value.source === 'ai' ? value.source : 'manual',
     desc: typeof value.desc === 'string' ? value.desc : '',
     history: normalizeHistory(value.history),
+    lora: normalizeLora(value.lora),
   };
 }
 
@@ -262,6 +301,7 @@ function cloneEntry(entry: CharTagEntry): CharTagEntry {
     ...entry,
     fields: { ...entry.fields },
     history: entry.history.map(record => ({ ...record })),
+    lora: entry.lora ? { ...entry.lora } : undefined,
   };
 }
 
@@ -544,6 +584,9 @@ export function upsertCharTag(
     history: entry.history.length
       ? entry.history.map(record => ({ ...record }))
       : (previous?.history.map(record => ({ ...record })) ?? []),
+    // LoRA 绑定只由角色管理页维护:这里以入参为准(不传 = 解绑)。
+    // 内部调用方(回滚/提升全局/复制回本聊天)都是基于现有条目展开,会自带 lora。
+    lora: entry.lora ? { ...entry.lora } : undefined,
   };
   if (opts.recordChanges && previous) {
     const at = Date.now();

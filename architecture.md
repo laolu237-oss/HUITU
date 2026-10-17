@@ -41,7 +41,8 @@ src/
 │   │                  # (纯浏览态都走 localStorage:渠道页签记忆同理,在 backend/index.vue)
 │   ├── history.ts     # 请求历史(LLM 推理+生图)模块级内存 store,刻意不持久化
 │   ├── charTags.ts    # 角色固定外貌库:本聊天基线(chatMetadata)+ AI 楼层增量(消息 extra),
-│   │                  # 全局库经 setGlobalCharTagSource 注入合并;锁定名拦截 AI changes
+│   │                  # 全局库经 setGlobalCharTagSource 注入合并;锁定名拦截 AI changes;
+│   │                  # 条目可带 lora(角色级 LoRA 绑定:文件名/强度/触发词)
 │   └── globalCharTags.ts # 全局角色库(extensionSettings,跨聊天/跨设备):仅手动维护的冻结模板,
 │                      # AI 永不可写;提升为全局/复制回本聊天两条迁移路径
 ├── api/
@@ -615,6 +616,21 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
 - `vibeStore.ts`:Vibe 原图/编码正文与缩略图分文件存 ST `user/files`，文件存储不可用时回退本机 IndexedDB。
   `extensionSettings['baibai_image']` 只留路径、模型键、指纹等小型索引，禁止再放 Base64。
 
+**角色级 LoRA 动态挂载(characterLora.ts)**:角色条目可带 `lora = { name, strength, trigger }`
+(角色管理页维护,AI 永远不写)。出图时按「本图角色名」决定挂谁:
+
+1. 协议:库里**只要有角色绑定了 LoRA**,自动 tag 就要求每张图输出 `names`(本图角色名,
+   逐字用库中原名);没有绑定则完全不加这个键(零额外 token)。
+   `names` 随 tag 持久化在正文里:`<bbi_image>…<names>["林知意","User"]</names><size>…</size></bbi_image>`。
+2. 出图(`generate.ts`):`resolveCharacterLoras(names)` 取本图该挂的 LoRA 与触发词;
+   `mergeCharacterLoras` 先把渠道里**被任何角色绑定过的** LoRA 剔除(旧的全挂做法),
+   再追加本图在场角色的绑定,其余风格 LoRA 原样保留。
+3. 触发词由插件 `withTriggers` **确定性拼在最前**——模型会把不认识的触发词当噪声删掉
+   (实测 `adnim` 被丢,LoRA 不触发),不能指望它照抄。
+4. 仅 ComfyUI「简易参数」模式生效:自定义工作流的节点由用户自己连,插件不往里插 LoRA 节点。
+5. 单槽「AI 重写提示词」若模型没回 `names`,沿用原 tag 里的名字(runner 兜底),
+   否则重写一次就丢掉挂载信息。
+
 ## 7. 状态与持久化
 
 - **settings(全局,跨设备)**:`state/settings.ts`。import 阶段以默认值建 reactive;
@@ -929,6 +945,7 @@ API 对象 `Object.freeze`,一个插件改不动下一个插件拿到的东西�
 | 世界书/角色卡/persona 装配 | src/autoTag/context.ts |
 | 柏宝书状态读取 | src/autoTag/bookMemory.ts |
 | 角色库 v3(基线+楼层增量/changes ops/@占位符兜底/历史回滚) | src/autoTag/charAnchors.ts + src/state/charTags.ts + src/autoTag/runner.ts |
+| 角色级 LoRA 动态挂载(按本图角色名挂 LoRA + 拼触发词;仅 ComfyUI 简易模式) | src/characterLora.ts + src/generate.ts + src/autoTag/protocol.ts(`names`) |
 | Vibe 分组 / 搜索 / 启用集合判定 | src/backends/vibeGroups.ts(纯逻辑)+ NaiPanel.vue(交互) |
 | 副 API 请求(代理/SSE/超时/测试) | src/api/client.ts |
 | 思考强度(渠道弹窗 + custom 源请求体) | src/state/settings.ts 的 `ApiChannel.reasoningEffort` + api/client.ts 的 `buildRequestBody`(UI 在 settings/index.vue) |

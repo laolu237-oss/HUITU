@@ -262,14 +262,28 @@ export async function generate(
 
   let output;
   try {
-    output = await generateImage({ prompt, nl, negative, characters, size, seed }, signal, {
-      onStart: () => report({ phase: 'generating' }),
-      onQueue: ahead => report({ phase: 'queued-remote', ahead }),
-      onRetry: retry =>
-        retry
-          ? report({ phase: 'retrying', attempt: retry.attempt, max: retry.max })
-          : report({ phase: 'generating' }),
-    });
+    output = await generateImage(
+      {
+        prompt,
+        nl,
+        negative,
+        characters,
+        // 第三方传了角色名就按名字挂载角色专属 LoRA(与楼层卡片同一条路);
+        // 没传 = 不挂,渠道里被角色绑定过的 LoRA 仍会被剔除。
+        ...(characters.length ? { characterNames: characters.map(character => character.name) } : {}),
+        size,
+        seed,
+      },
+      signal,
+      {
+        onStart: () => report({ phase: 'generating' }),
+        onQueue: ahead => report({ phase: 'queued-remote', ahead }),
+        onRetry: retry =>
+          retry
+            ? report({ phase: 'retrying', attempt: retry.attempt, max: retry.max })
+            : report({ phase: 'generating' }),
+      },
+    );
   } catch (error) {
     throw toPublicError(error);
   }

@@ -27,8 +27,10 @@ import { comfySimpleParams, composeNegative, composePositive, validateSimpleConf
 import { generateComfyImage, randomSeed, type ComfyImageResult } from '@/backends/comfyui';
 import { generateNaiImage, naiRandomSeed, naiSupportsCharacterPrompts } from '@/backends/nai';
 import { effectiveOrientation, parseSize, pickSize, type Orientation } from '@/backends/size';
+import { collectBoundLoraNames, mergeCharacterLoras, resolveCharacterLoras, withTriggers } from '@/characterLora';
 import { acquireNaiSlot } from '@/floor/genQueue';
 import type { GenerationMeta } from '@/generationMeta';
+import { charTagLib } from '@/state/charTags';
 import { activeComfyPreset, activeNaiEndpoint, activeOrientationLock, effectiveComfyConn, effectiveNai, settings, type BackendId } from '@/state/settings';
 
 /** 一次生成的输入。与协议层 ImageInsertion 同形,但不含正文位置信息。 */
@@ -41,6 +43,12 @@ export interface GenerateInput {
   negative?: string;
   /** NAI 4.5/V5 原生多角色提示;ComfyUI 不支持(见 charactersApplied)。 */
   characters?: ImageCharacterPrompt[];
+  /**
+   * 本图出现的角色名(与角色库条目逐字一致)。
+   * ComfyUI 简易模式据此动态挂载角色专属 LoRA 并拼上触发词;NAI 不用。
+   * 缺省/空数组 = 不挂任何角色 LoRA(渠道里被角色绑定过的 LoRA 也会被剔除)。
+   */
+  characterNames?: string[];
   /**
    * 画幅方向;缺省竖屏。具体像素取渠道配置里的横竖尺寸。
    * 渠道锁定了方向(activeOrientationLock)时一律按锁定方向出,这里传什么都不算数。
@@ -209,10 +217,30 @@ export async function generateImage(
       meta = { backend: 'nai', model: status.model, ...output.usage };
     } else {
       const conn = effectiveComfyConn();
+      // 角色级 LoRA:只挂本图在场角色的 LoRA,并把它们从渠道固定列表里剔除——
+      // 渠道里挂着角色 LoRA 是旧做法,留着会让所有同框角色互相污染。
+      // 仅简易模式生效:自定义工作流的节点由用户自己连,插件不能安全地往里插 LoRA 节点。
+      const resolved = resolveCharacterLoras(input.characterNames ?? [], charTagLib.entries);
+      const runConn =
+        conn.mode === 'simple'
+          ? (() => {
+              const bound = collectBoundLoraNames(charTagLib.entries);
+              if (!bound.size && !resolved.loras.length) return conn;
+              return {
+                ...conn,
+                simple: {
+                  ...conn.simple,
+                  loras: mergeCharacterLoras(conn.simple.loras, bound, resolved.loras),
+                },
+              };
+            })()
+          : conn;
+      // 触发词由插件确定性拼在最前:模型会把不认识的触发词当噪声删掉,不能指望它照抄。
+      const prompt = conn.mode === 'simple' ? withTriggers(input.prompt, resolved.triggers) : input.prompt;
       result = await generateComfyImage(
-        conn,
+        runConn,
         {
-          prompt: input.prompt,
+          prompt,
           nl: input.nl ?? '',
           negative_prompt: input.negative ?? '',
           seed: input.seed,
@@ -223,11 +251,11 @@ export async function generateImage(
       );
       // ComfyUI 没有运行期跳过的概念，配方全在预设里，可在此直接快照。
       // 尺寸解析口径与 generateComfyImage 一致（未解析出时 0 = 用工作流自带尺寸）。
-      const px = parseSize(pickSize(conn, size));
+      const px = parseSize(pickSize(runConn, size));
       const width = px?.width ?? 0;
       const height = px?.height ?? 0;
       const simpleValues: SimpleGenValues = {
-        prompt: input.prompt,
+        prompt,
         nl: input.nl,
         negative: input.negative,
         seed: input.seed,
@@ -240,11 +268,12 @@ export async function generateImage(
         width,
         height,
         // custom 模式的提示词由工作流里的占位符决定，无法在这里拼出全文，留空。
-        positive: conn.mode === 'simple' ? composePositive(conn.simple, simpleValues) : '',
-        negative: conn.mode === 'simple' ? composeNegative(conn.simple, simpleValues) : '',
+        positive: conn.mode === 'simple' ? composePositive(runConn.simple, simpleValues) : '',
+        negative: conn.mode === 'simple' ? composeNegative(runConn.simple, simpleValues) : '',
         artist: null,
         vibes: [],
-        params: conn.mode === 'simple' ? comfySimpleParams(conn.simple) : { mode: 'custom' },
+        // 记实际生效的 LoRA 列表(含动态挂载的角色 LoRA),事后复现才靠得住。
+        params: conn.mode === 'simple' ? comfySimpleParams(runConn.simple) : { mode: 'custom' },
       };
     }
 

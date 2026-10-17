@@ -294,6 +294,24 @@ describe('serializeImageTag', () => {
     ).toBe('<bbi_image>1girl<size>portrait</size></bbi_image>');
   });
 
+  it('round-trips character names (LoRA mounting) as a JSON array', () => {
+    const raw = serializeImageTag({
+      tag: '2girls, kitchen',
+      nl: '',
+      negative: '',
+      characters: [],
+      names: ['林知意', 'User'],
+      size: 'portrait',
+    });
+    expect(raw).toContain('<names>["林知意","User"]</names>');
+    const parsed = parseImageTagContent(raw);
+    expect(parsed.names).toEqual(['林知意', 'User']);
+    // 角色名不能漏进正向提示词
+    expect(parsed.tag).toBe('2girls, kitchen');
+    // 存量 tag 没有 <names> → 不产生该键
+    expect(parseImageTagContent('<bbi_image>1girl<size>portrait</size></bbi_image>').names).toBeUndefined();
+  });
+
   it('always writes <size> — generation is deferred, so orientation must persist in the text', () => {
     expect(
       serializeImageTag({ tag: '1girl', nl: '', negative: '', characters: [], size: 'landscape' }),

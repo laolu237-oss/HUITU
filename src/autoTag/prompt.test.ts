@@ -1246,11 +1246,11 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       settings.nai.model = 'nai-diffusion-4-5-full';
       settings.nai.naturalLanguage = true;
       settings.nai.orientationLock = 'auto';
-      expect(autoTagProfile()).toEqual({ naiCharPrompts: true, nl: true, lockedSize: null });
+      expect(autoTagProfile()).toEqual({ naiCharPrompts: true, nl: true, lockedSize: null, characterNames: false });
 
       settings.nai.naturalLanguage = false;
       settings.nai.orientationLock = 'portrait';
-      expect(autoTagProfile()).toEqual({ naiCharPrompts: true, nl: false, lockedSize: 'portrait' });
+      expect(autoTagProfile()).toEqual({ naiCharPrompts: true, nl: false, lockedSize: 'portrait', characterNames: false });
 
       // 单串分支(NAI4)的协议本来就不写 nl,开关对它不起作用
       settings.nai.model = 'nai-diffusion-4-full';
@@ -1261,13 +1261,54 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       settings.defaultBackend = 'comfyui';
       state.preset.naturalLanguage = true;
       state.preset.orientationLock = 'landscape';
-      expect(autoTagProfile()).toEqual({ naiCharPrompts: false, nl: true, lockedSize: 'landscape' });
+      expect(autoTagProfile()).toEqual({ naiCharPrompts: false, nl: true, lockedSize: 'landscape', characterNames: false });
 
       state.preset.naturalLanguage = false;
       state.preset.orientationLock = 'auto';
-      expect(autoTagProfile()).toEqual({ naiCharPrompts: false, nl: false, lockedSize: null });
+      expect(autoTagProfile()).toEqual({ naiCharPrompts: false, nl: false, lockedSize: null, characterNames: false });
     } finally {
       state.restore();
+    }
+  });
+});
+
+describe('character names protocol (ComfyUI 角色级 LoRA)', () => {
+  const options: AutoTagSettings = {
+    enabled: true,
+    contextMessages: 2,
+    minImages: 0,
+    maxImages: 2,
+    retryCount: 0,
+    autoGenerate: false,
+    prompts: prompts(),
+  };
+
+  it('requires per-image names only when the profile asks for them', async () => {
+    const oldBackend = settings.defaultBackend;
+    settings.defaultBackend = 'comfyui';
+    try {
+      // 库里没有 LoRA 绑定时:协议不出现 names,一分 token 不多付
+      const plain = await buildAutoTagMessages(context(), 1, options, null);
+      expect(plain.map(message => message.content).join('\n')).not.toContain('"names"');
+
+      const withNames = await buildAutoTagMessages(
+        context(),
+        1,
+        options,
+        null,
+        undefined,
+        null,
+        null,
+        '',
+        { ...autoTagProfile(), characterNames: true },
+      );
+      const body = withNames.map(message => message.content).join('\n');
+      // 示例里带上 names,规则里说清「只放名字、不放外貌」
+      expect(body).toContain('"names":["小雪"]');
+      expect(body).toContain('names（本图角色名）');
+      expect(body).toContain('逐字使用【角色固定外貌库】里的原名');
+    } finally {
+      settings.defaultBackend = oldBackend;
     }
   });
 });

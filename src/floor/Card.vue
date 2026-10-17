@@ -64,6 +64,8 @@ const props = defineProps<{
   /** tag 原文解析出的动态负面部分(无则空串;生成时写入 %negative_prompt% 占位符)。 */
   negative: string;
   characters: ImageCharacterPrompt[];
+  /** 本图出现的角色名(角色级 LoRA 动态挂载用;NAI 不用)。 */
+  names: string[];
   /** 画幅方向(模型判定,随 tag 持久化):决定用渠道配置里的竖屏还是横屏尺寸;渠道锁了横竖时以锁为准(见 effectiveSize)。 */
   size: Orientation;
   /** tag 原文(含 <bbi_image> 壳):生成提交与 promptHash 的输入。 */
@@ -271,6 +273,8 @@ async function generate(): Promise<void> {
     nl: props.nl,
     negative: props.negative,
     characters: props.characters.map(character => ({ ...character })),
+    // 角色名随任务一起快照:出图时按它挂载角色专属 LoRA(见 generate.ts)
+    characterNames: [...props.names],
     size: effectiveSize.value,
   };
   // NAI 需要闸门排队 → 先显示「排队中」;ComfyUI 有服务端队列,直接进 generating
@@ -372,6 +376,7 @@ function openEditor(): void {
       nl: props.nl,
       negative: props.negative,
       characters: props.characters.map(character => ({ ...character })),
+      names: [...props.names],
       size: props.size,
     },
     // 存活口径:文案要许诺「改回提示词即可找回」,被图库删掉的图找不回来,不能算进去

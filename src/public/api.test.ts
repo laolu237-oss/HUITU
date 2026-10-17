@@ -216,6 +216,8 @@ describe('generate', () => {
       nl: 'a girl',
       negative: 'bad hands',
       characters: [{ name: '阿黛尔', tag: '1girl, silver hair', nl: '' }],
+      // 传了角色名就带上:出图侧据此挂载角色专属 LoRA
+      characterNames: ['阿黛尔'],
       size: 'landscape',
       seed: 4242,
     });

@@ -283,4 +283,28 @@ describe('global library merge & lock', () => {
     expect(deriveCharTags(base, chat, chat.length, new Set(['玩家']))[0].fields.facialFeatures).toBe('short black hair');
     expect(deriveCharTags(base, chat)[0].fields.facialFeatures).toBe('long red hair');
   });
+
+  it('normalizeCharTagStore: 保留角色 LoRA 绑定并夹住强度', () => {
+    const [entry] = normalizeCharTagStore({
+      version: 3,
+      entries: [
+        {
+          name: '小雪',
+          raw: '1girl',
+          lora: { name: ' Anima\\角色.safetensors ', strength: 9, trigger: ' adnim ' },
+        },
+      ],
+    });
+    expect(entry.lora).toEqual({
+      name: 'Anima\\角色.safetensors',
+      strength: 2,
+      trigger: 'adnim',
+    });
+    // 名字为空 = 未绑定;缺字段的旧条目照常读出
+    const [plain] = normalizeCharTagStore({
+      version: 3,
+      entries: [{ name: '路人', raw: '1boy', lora: { name: '   ', strength: 1 } }],
+    });
+    expect(plain.lora).toBeUndefined();
+  });
 });

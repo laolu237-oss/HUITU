@@ -74,6 +74,9 @@ const size = ref<Orientation>(props.content.size);
 const characters = ref<ImageCharacterPrompt[]>(
   props.content.characters.map(character => ({ ...character })),
 );
+// 角色名只读:它是出图时挂载角色 LoRA 的依据,不让人在提示词弹窗里改
+// (要改请到「角色管理」改档案,否则正文与档案会对不上)。
+const names = ref<string[]>([...(props.content.names ?? [])]);
 
 /**
  * 当前渠道的画幅锁(null = 未锁,见 settings.ts 的 activeOrientationLock)。
@@ -103,6 +106,7 @@ const draft = computed<ImageTagContent>(() => ({
     }))
     // 与 parseImageTagContent 同口径:name/tag 缺一条即丢弃(空行不落进正文)
     .filter(character => character.name && character.tag),
+  names: names.value,
   size: size.value,
 }));
 
@@ -169,6 +173,7 @@ watch(
     negative.value = next.negative;
     size.value = next.size;
     characters.value = next.characters.map(character => ({ ...character }));
+    names.value = [...(next.names ?? [])];
   },
 );
 

@@ -25,6 +25,12 @@ export interface ImageInsertion {
   /** 本画面动态负面 tag(可空;仅在 ComfyUI 工作流使用 %negative_prompt% 时要求模型输出)。 */
   negative: string;
   characters: ImageCharacterPrompt[];
+  /**
+   * 本图实际出现的角色名(与角色库条目逐字一致)。
+   * ComfyUI 简易模式据此动态挂载角色专属 LoRA;库中没有任何 LoRA 绑定时协议不要求该键。
+   * 可选:存量正文里的 tag 没有这个子标签。
+   */
+  names?: string[];
   /** 画幅方向:模型只判横/竖,具体像素由用户在后端面板配置。漏给/乱给一律降级竖屏。 */
   size: Orientation;
 }
@@ -150,6 +156,22 @@ function sanitizeCharacters(value: unknown, imageIndex: number): ImageCharacterP
   return characters;
 }
 
+/**
+ * 本图角色名:字符串数组,去空、去重、最多 8 个、单个最长 40 字。
+ * **刻意不校验名字是否在库**:建档中的新角色也在库里(本楼 changes 后生效),
+ * 校验属于 runner/出图侧的职责;这里只保证形状干净,不因一个名字作废整张图。
+ */
+function sanitizeNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const names: string[] = [];
+  for (const item of value.slice(0, 8)) {
+    if (typeof item !== 'string') continue;
+    const name = item.trim().slice(0, 40);
+    if (name && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
 function sanitizePosition(value: unknown, index: number): string {
   const position = typeof value === 'string' ? value.trim().toUpperCase() : '';
   if (!position) throw new Error(`images[${index}].position 不能为空`);
@@ -197,9 +219,20 @@ export function parseImagePlan(
     const nl = sanitizeContent(entry.nl, 'nl', index);
     const negative = sanitizeContent(entry.negative ?? entry.negative_prompt, 'negative', index);
     const characters = sanitizeCharacters(entry.characters, index);
+    const names = sanitizeNames(entry.names);
     // 兼容模型按习惯返回 orientation / aspect 键
     const size = normalizeOrientation(entry.size ?? entry.orientation ?? entry.aspect);
-    images.push({ position, sourceLine, tag, nl, negative, characters, size });
+    // 没有 names 时**不产生该键**:与存量解析结果逐字段一致(老数据/老断言都不受影响)
+    images.push({
+      position,
+      sourceLine,
+      tag,
+      nl,
+      negative,
+      characters,
+      ...(names.length ? { names } : {}),
+      size,
+    });
   }
 
   const limitedImages = images.slice(0, normalizedMax);

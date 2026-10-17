@@ -47,6 +47,12 @@ export interface AutoTagProfile {
   nl: boolean;
   /** 渠道锁定的画幅方向;null = 由 AI 按后端规范的判据自选。 */
   lockedSize: Orientation | null;
+  /**
+   * 协议要求每张图输出 names(本图角色名数组)。
+   * 仅当角色库里有角色绑定了专属 LoRA 时开启——出图侧据此动态挂载 LoRA。
+   * 由 runner 按库状态覆盖(见 runner.ts),autoTagProfile 自身只知道设置、不知道库。
+   */
+  characterNames: boolean;
 }
 
 export function autoTagProfile(): AutoTagProfile {
@@ -58,7 +64,9 @@ export function autoTagProfile(): AutoTagProfile {
       ? activeComfyPreset().naturalLanguage
       : naiCharPrompts && settings.nai.naturalLanguage;
   const lock = activeOrientationLock();
-  return { naiCharPrompts, nl, lockedSize: lock === 'auto' ? null : lock };
+  // characterNames 依赖「库里有没有角色绑定 LoRA」,那是 runner 的视野;
+  // 这里给安全默认(false),runner 会用库状态覆盖。
+  return { naiCharPrompts, nl, lockedSize: lock === 'auto' ? null : lock, characterNames: false };
 }
 
 /**
@@ -267,6 +275,9 @@ export async function buildAutoTagMessages(
   if (nlOn && !naiCharPromptsOn) sampleImage.nl = sampleNl;
   if (negativeOn) sampleImage.negative = 'extra people, duplicate character';
   sampleImage.size = profile.lockedSize ?? 'portrait';
+  // 角色级 LoRA:仅 ComfyUI 且库里确有角色绑定 LoRA 时才要求 names(否则一分 token 不多付)
+  const namesOn = profile.characterNames && !naiCharPromptsOn;
+  if (namesOn) sampleImage.names = ['小雪'];
   const outputShape = JSON.stringify({ images: [sampleImage], changes: [] });
   // NAI 两种写法共用的尾段:角色块的取舍与 Base / 角色的分工不随自然语言开关变
   const naiCharacterRuleTail =
@@ -321,7 +332,7 @@ export async function buildAutoTagMessages(
     ? '- 多人画面中，每个角色的发色、瞳色、体型、服装、物件和个人动作都必须放进各自的 characters[].tag，禁止放进 Base 或分配给其他角色。'
     : '- 多人画面中，每个角色的发色、瞳色、体型、服装、物件和个人动作都必须使用该角色的区分性称谓邻接绑定，禁止把两人的外貌特征散放成无法归属的一串公共 tag。';
   const characterRule = `7. 角色状态与 changes：${newCharacterRule}
-   ${libraryReferenceRule}
+   ${namesOn ? '- **names（本图角色名）**：每张图必须输出 names 数组，列出本图**实际出现**的角色名，逐字使用【角色固定外貌库】里的原名（本楼新建档的用建档名）；镜头外的角色、无名路人都不要写。names 只放名字，不放外貌——外貌照旧写进 tag。\n   ' : ''}${libraryReferenceRule}
    - **女性角色的服装禁止自行创作**：不得由你设计版型、剪裁、颜色、部件，不得“合理补全”，她的款式只能来自【服装库】。男性角色不读【服装库】，其服装每次按剧情生成。
    - 按正文 P 位置维护每个角色的服装**状态**（穿着／赤裸／部分赤裸／破损），没有明确变化时沿用上一状态，明确变化后从对应 P 位置起更新；相同状态复用同一套。
    - **女性角色的服装只能从【服装库】挑**。**「可用」只按归属判定，与情境是否贴合无关**：标注「通用」的，以及标注「仅限 该角色名」的（后者只能用于本人，不能穿到别人身上）。只要该角色存在可用条目，就必须从里面挑，**只有一套时无条件直接采用**——即使这套与正文描写的穿着完全不同、即使它是 nude、即使当前场景是日常约会，也**不许以「不适合当前情境」为由判定为不可用**。有多套时才按正文情境挑最贴合的一套，分类名是场景信号（正文情境与某个分类明显对应时，优先从该分类里挑）。挑中后**照抄其词串、用词一字不改**：把该条目在【服装库】区块里的完整词串整体写进 tag（含其中的 <lora:名称:权重> 与全部服装部件），不得只抄身份 tag、不得只抄一部分；条目词串里若已含人数 tag（1girl / 1boy / 2girls 等），与本画面的人数 tag 合并后只写一次，不要重复；不得增删改写、不得换用近义词，也不能在一条内部挑零件或拼接——衣柜的最小单位就是一条完整条目。同一状态一直复用这一套。

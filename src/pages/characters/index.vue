@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import BbiCombo from '@/components/BbiCombo.vue';
 import BbiSelect from '@/components/BbiSelect.vue';
 import BbiTextarea from '@/components/BbiTextarea.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
@@ -41,6 +42,8 @@ import {
   upsertGlobalCharTag,
 } from '@/state/globalCharTags';
 import { getContext } from '@/st/context';
+import { fetchComfyModelLists } from '@/backends/comfyObjectInfo';
+import { settings } from '@/state/settings';
 import { phoneAppearanceMissHint, readPhoneAppearance } from '@/st/phoneAppearance';
 import { computed, reactive, ref } from 'vue';
 
@@ -77,6 +80,31 @@ const draft = ref<Draft | null>(null);
 const draftSource = ref<CharTagEntry['source']>('manual');
 const draftDesc = ref('');
 const regenerating = ref(false);
+
+/* —— 角色专属 LoRA ——
+ * 绑定挂在角色条目上:只有该角色出现在画面里时,出图才挂载这个 LoRA 并把触发词拼进
+ * 正向提示词(见 generate.ts / characterLora.ts)。渠道里同名 LoRA 会被自动剔除,
+ * 避免同框角色互相污染。仅 ComfyUI「简易参数」模式生效。 */
+const draftLoraName = ref('');
+const draftLoraStrength = ref(1);
+const draftLoraTrigger = ref('');
+// 候选来自 ComfyUI 的 LoRA 目录;服务未启动/走服务端代理时为空,此时仍可手填文件名。
+const loraOptions = ref<string[]>([]);
+const loraLoading = ref(false);
+async function ensureLoraOptions(): Promise<void> {
+  if (loraOptions.value.length || loraLoading.value) return;
+  const url = settings.comfyui.url.trim();
+  if (!url) return;
+  loraLoading.value = true;
+  try {
+    const lists = await fetchComfyModelLists(url);
+    loraOptions.value = lists.loras ?? [];
+  } catch {
+    // ComfyUI 没开时静默:输入框退化为普通文本框,不影响手动填写
+  } finally {
+    loraLoading.value = false;
+  }
+}
 // 弹窗内历史面板开关
 const historyOpen = ref(false);
 // 回滚确认
@@ -301,6 +329,10 @@ function openEntry(entry: CharTagEntry, scope: Scope) {
   };
   draftSource.value = entry.source;
   draftDesc.value = entry.desc;
+  draftLoraName.value = entry.lora?.name ?? '';
+  draftLoraStrength.value = entry.lora?.strength ?? 1;
+  draftLoraTrigger.value = entry.lora?.trigger ?? '';
+  void ensureLoraOptions();
   historyOpen.value = false;
 }
 
@@ -311,6 +343,10 @@ function addEntry(scope: Scope = 'chat') {
   draft.value = { name: '', fields: emptyCharFields(), raw: '', nl: '' };
   draftSource.value = 'manual';
   draftDesc.value = '';
+  draftLoraName.value = '';
+  draftLoraStrength.value = 1;
+  draftLoraTrigger.value = '';
+  void ensureLoraOptions();
   historyOpen.value = false;
 }
 
@@ -372,6 +408,7 @@ function confirmEntry() {
     toastr.warning('至少填一个外貌字段(或整串 tag)', '柏宝绘');
     return;
   }
+  const loraName = draftLoraName.value.trim();
   const entryData: CharTagEntry = {
     name,
     fields: d.fields,
@@ -380,6 +417,14 @@ function confirmEntry() {
     source: draftSource.value,
     desc: draftDesc.value,
     history: [],
+    // 名字留空 = 解绑;强度夹在 0–2,与 normalizeLora 同口径
+    lora: loraName
+      ? {
+          name: loraName,
+          strength: Math.min(2, Math.max(0, Number(draftLoraStrength.value) || 0)),
+          trigger: draftLoraTrigger.value.trim(),
+        }
+      : undefined,
   };
   const ok =
     draftScope.value === 'global'
@@ -878,6 +923,13 @@ function confirmClearAll(): void {
                     <span v-if="charTagBaseNames.has(entry.name)" class="bbi-char-pill is-override" title="本聊天有同名角色,当前聊天以本聊天的为准">
                       本聊天已覆盖
                     </span>
+                    <span
+                      v-if="entry.lora?.name"
+                      class="bbi-char-pill is-lora"
+                      :title="`出图时动态挂载:${entry.lora.name}(强度 ${entry.lora.strength})`"
+                    >
+                      LoRA
+                    </span>
                   </span>
                 </span>
                 <span v-if="chipsOf(entry).length" class="bbi-char-chips">
@@ -965,6 +1017,13 @@ function confirmClearAll(): void {
                     </span>
                     <span v-if="globalNameSet.has(entry.name)" class="bbi-char-pill is-override" title="与全局库同名,当前聊天以本条为准">
                       覆盖全局
+                    </span>
+                    <span
+                      v-if="entry.lora?.name"
+                      class="bbi-char-pill is-lora"
+                      :title="`出图时动态挂载:${entry.lora.name}(强度 ${entry.lora.strength})`"
+                    >
+                      LoRA
                     </span>
                     <span
                       v-if="entry.history.length"
@@ -1325,6 +1384,45 @@ function confirmClearAll(): void {
             @input="markManual"
           />
         </label>
+
+        <!-- 角色专属 LoRA:只在角色出现在画面里时挂载,避免同框角色互相污染 -->
+        <div class="bbi-modal-field">
+          <span class="bbi-modal-label">LoRA 挂载(可选)</span>
+          <div class="bbi-char-form bbi-char-form--list">
+            <label class="bbi-char-form-row bbi-char-form-row--full">
+              <span class="bbi-char-form-label">LoRA 文件</span>
+              <BbiCombo
+                v-model="draftLoraName"
+                :options="loraOptions"
+                placeholder="留空 = 不绑定;可从 ComfyUI 的 models/loras 里选"
+                aria-label="LoRA 文件"
+              />
+            </label>
+            <label class="bbi-char-form-row bbi-char-form-row--full">
+              <span class="bbi-char-form-label">强度</span>
+              <input
+                v-model.number="draftLoraStrength"
+                class="bbi-input"
+                type="number"
+                min="0"
+                max="2"
+                step="0.05"
+              />
+            </label>
+            <label class="bbi-char-form-row bbi-char-form-row--full">
+              <span class="bbi-char-form-label">触发词</span>
+              <input
+                v-model="draftLoraTrigger"
+                class="bbi-input"
+                placeholder="如 adnim;留空则不拼触发词"
+              />
+            </label>
+          </div>
+        </div>
+        <span class="bbi-field-hint">
+          只有该角色出现在画面里时才挂载这个 LoRA,并把触发词拼在正向提示词最前面;渠道里同名的 LoRA 会被自动剔除。
+          仅 ComfyUI「简易参数」模式生效(自定义工作流请在渠道页自行挂载)。
+        </span>
 
         <div class="bbi-char-preview">
           <span class="bbi-field-label">最终 tag 预览</span>
@@ -1828,6 +1926,13 @@ function confirmClearAll(): void {
 .bbi-char-pill.is-chat {
   color: var(--bbi-ink-soft);
 }
+/* LoRA 绑定徽标:与来源徽标区分开,用中性描边样式,不抢强调色 */
+.bbi-char-pill.is-lora {
+  color: var(--bbi-ink-soft);
+  background: transparent;
+  border-color: var(--bbi-line);
+  letter-spacing: 0.02em;
+}
 .bbi-char-pill.is-book,
 .bbi-char-pill.is-ai {
   color: var(--bbi-accent);
@@ -1837,8 +1942,7 @@ function confirmClearAll(): void {
 .bbi-char-pill.is-override {
   color: var(--bbi-warning);
   background: var(--bbi-warning-soft);
-  border-color: transparent;
-}
+  border-color: transparent;}
 
 /* —— 字段 chips:两行封顶,超出裁切 —— */
 .bbi-char-chips {

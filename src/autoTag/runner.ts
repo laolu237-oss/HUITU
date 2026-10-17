@@ -36,6 +36,7 @@ import { applyMessageText, type ApplyMessageResult } from '@/st/messageEdit';
 import { getContext, isAiStoryMessage, type STMessage } from '@/st/context';
 import {
   hasImageTagTrace,
+  parseImageTagContent,
   parseImageTags,
   replaceImageTagAt,
   serializeImageTag,
@@ -318,8 +319,13 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     const promptOptions = slot
       ? { ...settings.autoTag, minImages: 1, maxImages: 1 }
       : settings.autoTag;
-    // 协议形态开跑时快照一次:写协议、验收与收尾同一份,用户中途拨开关也不会前后不一
-    const profile = autoTagProfile();
+    // 协议形态开跑时快照一次:写协议、验收与收尾同一份,用户中途拨开关也不会前后不一。
+    // characterNames 由库状态决定:只有真有角色绑定了 LoRA 才要求模型输出角色名,
+    // 否则这条协议对没用到该功能的用户就是纯开销。
+    const profile = {
+      ...autoTagProfile(),
+      characterNames: entriesBefore.some(entry => !!entry.lora?.name.trim()),
+    };
     // 服装库文本:与角色库同一处渲染、同一个请求里下发。空池返回空串 → prompt.ts
     // 不注入该块,任务协议的兜底句式接住(没用衣柜的用户零额外开销)。
     const closetText = buildClosetText(closetLib.categories, closetLib.outfits, profile.nl);
@@ -411,6 +417,13 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         '柏宝绘自动 tag 失败',
       );
       return;
+    }
+
+    // 单槽重写:模型只被要求重写提示词,未必回 names;沿用原 tag 里的角色名,
+    // 否则重写一次就把「角色级 LoRA 挂载」的信息弄丢了(画面没变,挂载也不该变)。
+    if (slot && slotRawTag && plan.images[0] && !plan.images[0].names?.length) {
+      const existingNames = parseImageTagContent(slotRawTag).names ?? [];
+      if (existingNames.length) plan.images[0].names = existingNames;
     }
 
     // 单槽重写不落 changes:首次全量分析已为整楼建过档,这里再应用一次只会产生

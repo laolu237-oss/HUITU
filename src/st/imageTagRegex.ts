@@ -171,7 +171,7 @@ export function stripImageTags(mes: string): string {
  * 内容里混进一个 `</bbi_image>` 就会让 tag 提前截断、后半截漏进 DOM 与提示词，
  * 正好破掉「tag 永不进 DOM、永不进提示词」这条不变式。
  */
-export const FORBIDDEN_SUBTAG = /<\/?(?:bbi_image|tag|nl|negative|characters|size)\b/i;
+export const FORBIDDEN_SUBTAG = /<\/?(?:bbi_image|tag|nl|negative|characters|names|size)\b/i;
 
 /** 文本里是否含 bbi_image 子标签字面量（手输校验用；口径同 AI 侧）。 */
 export function containsTagMarkup(text: string): boolean {
@@ -186,6 +186,11 @@ export interface ImageTagContent {
   /** 本画面动态负面 tag：<negative> 子标签内容，无则空串。 */
   negative: string;
   characters: ImageCharacterPrompt[];
+  /**
+   * 本图出现的角色名(与角色库条目逐字一致)。
+   * 只服务 ComfyUI 的角色级 LoRA 动态挂载,不参与提示词文本;存量 tag 没有该键。
+   */
+  names?: string[];
   /** 画幅方向：<size> 子标签内容，无/不可识别则竖屏（存量 tag 即走这条，行为与改动前一致）。 */
   size: Orientation;
 }
@@ -227,17 +232,41 @@ export function parseImageTagContent(raw: string): ImageTagContent {
   }
   const sizeMatch = inner.match(/<size>([\s\S]*?)<\/size>/i);
   const size = normalizeOrientation(sizeMatch ? oneLine(sizeMatch[1]) : '');
+  // <names> 存 JSON 数组(角色名可能含逗号/标点);容忍旧的手写逗号分隔形态。
+  const namesMatch = inner.match(/<names>([\s\S]*?)<\/names>/i);
+  let names: string[] = [];
+  if (namesMatch) {
+    const body = oneLine(namesMatch[1]);
+    try {
+      const parsed = JSON.parse(body);
+      if (Array.isArray(parsed)) {
+        names = parsed
+          .filter((item): item is string => typeof item === 'string')
+          .map(item => item.trim())
+          .filter(Boolean)
+          .slice(0, 8);
+      }
+    } catch {
+      names = body
+        .split(/[,，、]/)
+        .map(item => item.trim())
+        .filter(Boolean)
+        .slice(0, 8);
+    }
+  }
   const withoutSubTags = inner
     .replace(/<nl>[\s\S]*?<\/nl>/gi, '')
     .replace(/<negative>[\s\S]*?<\/negative>/gi, '')
     .replace(/<characters>[\s\S]*?<\/characters>/gi, '')
+    .replace(/<names>[\s\S]*?<\/names>/gi, '')
     .replace(/<size>[\s\S]*?<\/size>/gi, '');
   const explicit = [...withoutSubTags.matchAll(/<tag>([\s\S]*?)<\/tag>/gi)]
     .map(match => oneLine(match[1]))
     .filter(Boolean);
   const bare = oneLine(withoutSubTags.replace(/<tag>[\s\S]*?<\/tag>/gi, ''));
   const tag = [...(bare ? [bare] : []), ...explicit].join(', ');
-  return { tag, nl, negative, characters, size };
+  // 没有 <names> 时**不产生该键**:与存量解析结果逐字段一致,老断言与老数据都不受影响。
+  return { tag, nl, negative, characters, ...(names.length ? { names } : {}), size };
 }
 
 /**
@@ -256,7 +285,9 @@ export function serializeImageTag(content: ImageTagContent): string {
   const characters = content.characters.length
     ? `<characters>${JSON.stringify(content.characters)}</characters>`
     : '';
-  return `<bbi_image>${content.tag}${nl}${negative}${characters}<size>${content.size}</size></bbi_image>`;
+  // 角色名走 JSON 数组:名字可能含逗号或标点,裸串分隔会解析错。
+  const names = content.names?.length ? `<names>${JSON.stringify(content.names)}</names>` : '';
+  return `<bbi_image>${content.tag}${nl}${negative}${characters}${names}<size>${content.size}</size></bbi_image>`;
 }
 
 /**
