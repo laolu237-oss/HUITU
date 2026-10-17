@@ -85,6 +85,16 @@ const imageDisplaySel = computed<string>({
 });
 const IMAGE_DISPLAY_OPTIONS = IMAGE_DISPLAY_SIZES.map(o => ({ value: o.value, label: o.label }));
 
+// 角色库下发口径:relevant 只发本楼相关角色的完整字段(省 token),all 为旧的全量行为
+const LIBRARY_FILTER_OPTIONS = [
+  { value: 'relevant', label: '仅本楼相关角色' },
+  { value: 'all', label: '整库全量（旧行为）' },
+];
+const libraryFilterSel = computed<string>({
+  get: () => settings.autoTag.libraryFilter ?? 'relevant',
+  set: v => (settings.autoTag.libraryFilter = v === 'all' ? 'all' : 'relevant'),
+});
+
 // 副 API「生成 tag 使用」:空串 = 跟随主 API,其余为渠道 id。
 // 渠道增删改名要实时反映到选项里,故用 computed 而非静态常量。
 const tagGenSel = computed<string>({
@@ -757,6 +767,20 @@ async function confirmImport() {
           />
         </label>
         <p class="bbi-field-hint">按 AI 故事楼计数,中间的 user 楼一并携带。</p>
+
+        <div class="bbi-select-row">
+          <span class="bbi-field-label">角色库下发范围</span>
+          <BbiSelect
+            v-model="libraryFilterSel"
+            :options="LIBRARY_FILTER_OPTIONS"
+            aria-label="角色库下发范围"
+          />
+        </div>
+        <p class="bbi-field-hint">
+          默认只把本楼正文、携带上下文和柏宝书记忆里出现的角色按完整外貌下发，其余角色只发名字；
+          角色多时能省掉绝大部分 token。玩家与主角色始终保留完整档案。若发现某角色外貌没照抄库，
+          可切回「整库全量」。
+        </p>
 
         <label class="bbi-num-row">
           <span class="bbi-field-label">单楼最少图片数</span>

@@ -32,6 +32,13 @@ import { getTagGenChannel } from '@/state/settings';
  * 请求判断得更准。建档与用档同属一次推理,后续 tag 才能围绕刚确立的外貌协调。
  *
  * 主流程顺序:先落 changes(本楼发生的变化当楼生效) → 再兜底替换残留的 @占位符。
+ *
+ * v0.3.12 起支持**相关性筛选**(selectLibraryEntries):整库下发在角色多时会把每次请求
+ * 的 token 顶到几万——62 个角色的库文本就有约 8 万字符,而一层楼通常只出现两三个人。
+ * 现在按「目标正文 + 携带上下文 + 柏宝书记忆」本地扫名字,命中的发全量字段,
+ * 其余压成一行名单(仅供判断「是否已建档」)。纯本地、无额外请求、结果确定;
+ * 代价是别名/代称(正文写「苏老师」而库中叫「苏曼」)扫不到——那种情况下该角色
+ * 本轮拿不到字段,AI 会按正文自行描写,档案本身不受影响(已存在名字的 new 是 no-op)。
  */
 
 /** 把库条目渲染成给 AI 看的一行(字段式明细 + 占位符提示);锁定条目带 [locked] 标记。 */
@@ -46,17 +53,120 @@ export function formatEntryForPrompt(entry: CharTagEntry, locked = false): strin
   return `- ${entry.name}${locked ? ' [locked]' : ''}: ${parts.join(', ') || '(未记录字段)'}`;
 }
 
+/** 相关性筛选的配置。缺省(不传 corpus 或 mode='all')= 整库下发,即旧行为。 */
+export interface LibraryFilterOptions {
+  /**
+   * 本次请求可见的剧情素材:目标正文 + 携带的上下文楼 + 柏宝书记忆。
+   * 空串/未传 = 不过滤。刻意不含世界书与角色卡——那里人名密度高,
+   * 扫进去会把库拉回全量,正好抵消筛选的意义。
+   */
+  corpus?: string | null;
+  /**
+   * 无论是否命中都保留完整字段的名字(玩家/主角色)。
+   * 剧情常用「你」指代主角,名字根本不出现,只靠扫描会漏掉他。
+   */
+  alwaysNames?: readonly string[];
+  /** 'all' = 关闭筛选,整库全量下发(排查问题时的回退口径)。 */
+  mode?: 'relevant' | 'all';
+}
+
+export interface LibrarySelection {
+  /** 命中:完整字段下发,AI 可照抄。 */
+  matched: CharTagEntry[];
+  /** 未命中:只发名字,供「是否已建档」判断。 */
+  roster: CharTagEntry[];
+}
+
+/**
+ * 按语料筛选角色库条目。**长名优先 + 命中区间遮蔽**:
+ * 先占位的长名会把短名的命中区间盖住,避免「林小曼」被「林曼」重复命中,
+ * 也避免短名在长名内部误命中。命中即止(只需存在性),保持原库顺序返回。
+ */
+export function selectLibraryEntries(
+  entries: CharTagEntry[],
+  corpus?: string | null,
+  alwaysNames: readonly string[] = [],
+): LibrarySelection {
+  const text = (corpus ?? '').trim();
+  if (!text) return { matched: entries.slice(), roster: [] };
+  const always = new Set(alwaysNames.map(name => name.trim()).filter(Boolean));
+  const names = entries
+    .map(entry => entry.name.trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  const claimed: Array<[number, number]> = [];
+  const hit = new Set<string>();
+  for (const name of names) {
+    if (always.has(name)) {
+      hit.add(name);
+      continue;
+    }
+    let from = 0;
+    while (from <= text.length) {
+      const at = text.indexOf(name, from);
+      if (at < 0) break;
+      const end = at + name.length;
+      if (!claimed.some(([start, stop]) => at < stop && end > start)) {
+        hit.add(name);
+        claimed.push([at, end]);
+        break;
+      }
+      from = at + 1;
+    }
+  }
+  const matched: CharTagEntry[] = [];
+  const roster: CharTagEntry[] = [];
+  for (const entry of entries) (hit.has(entry.name.trim()) ? matched : roster).push(entry);
+  return { matched, roster };
+}
+
+/** 名单行:仅名字 + 锁定标记。用顿号连成一行,比逐行列表省 token。 */
+function formatRosterLine(entries: CharTagEntry[], lockedNames?: ReadonlySet<string>): string {
+  return entries
+    .map(entry => `${entry.name}${lockedNames?.has(entry.name) ? ' [locked]' : ''}`)
+    .join('、');
+}
+
 /**
  * 库文本:发给 AI 的角色库部分。AI 依据它决定 changes,并在 tag/nl 中照抄对应字段;
  * 名单与字段值都由插件生成,AI 只读。锁定名(全局库)带 [locked] 标记并在头部声明不可变。
+ *
+ * 传了 corpus 且 mode ≠ 'all' 时走相关性筛选:命中的角色发全量字段,其余压成一行名单。
+ * 名单小节仍然算「已建档」——它的唯一作用是让 AI 不把老角色误判成新人;
+ * 字段刻意不发,因为那些角色本楼正文根本没出现。
  */
-export function buildLibraryText(entries: CharTagEntry[], lockedNames?: ReadonlySet<string>): string {
+export function buildLibraryText(
+  entries: CharTagEntry[],
+  lockedNames?: ReadonlySet<string>,
+  options: LibraryFilterOptions = {},
+): string {
   if (!entries.length) return '';
-  const lines = entries.map(entry => formatEntryForPrompt(entry, lockedNames?.has(entry.name) ?? false));
   const lockedNote = lockedNames?.size
     ? '; entries marked [locked] are global and immutable: never report changes for them, always copy their fields as-is'
     : '';
-  return `【角色固定外貌库】[system-maintained; copy fields verbatim into character prompts${lockedNote}]\n${lines.join('\n')}`;
+  const header = `【角色固定外貌库】[system-maintained; copy fields verbatim into character prompts${lockedNote}]`;
+  const isLocked = (entry: CharTagEntry) => lockedNames?.has(entry.name) ?? false;
+
+  const filterOn = options.mode !== 'all' && !!(options.corpus ?? '').trim();
+  if (!filterOn) {
+    const lines = entries.map(entry => formatEntryForPrompt(entry, isLocked(entry)));
+    return `${header}\n${lines.join('\n')}`;
+  }
+
+  const { matched, roster } = selectLibraryEntries(entries, options.corpus, options.alwaysNames);
+  const sections: string[] = ['## 本楼相关（完整字段，可直接照抄）'];
+  sections.push(
+    matched.length
+      ? matched.map(entry => formatEntryForPrompt(entry, isLocked(entry))).join('\n')
+      : '（本楼没有命中已建档角色。）',
+  );
+  if (roster.length) {
+    sections.push(
+      '## 其余已建档（本楼未出现；仅用于判断「是否已建档」，不要为其输出 changes，也不要凭名字猜字段）',
+    );
+    sections.push(formatRosterLine(roster, lockedNames));
+  }
+  return `${header}\n${sections.join('\n')}`;
 }
 
 /** 旧接口兼容:runner 之外仍有调用方依赖锚定文本形态。 */
@@ -185,8 +295,10 @@ export interface ResolvedCharAnchors {
 export function resolveCharAnchors(
   entriesBefore: CharTagEntry[],
   lockedNames?: ReadonlySet<string>,
+  /** 相关性筛选配置;缺省整库下发(与旧行为一致,测试与第三方调用不受影响)。 */
+  filter?: LibraryFilterOptions,
 ): ResolvedCharAnchors {
-  const text = buildLibraryText(entriesBefore, lockedNames);
+  const text = buildLibraryText(entriesBefore, lockedNames, filter);
   return { text: text || null, entries: entriesBefore };
 }
 

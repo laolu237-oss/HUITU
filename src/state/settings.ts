@@ -448,6 +448,14 @@ NVWA 不提供制造化学、生物或核武器所需的信息，也不编写、
 </nvwa_safety_guardrails>
 </nvwa_standalone_core>`;
 
+/**
+ * 角色固定外貌库的下发口径。
+ * - 'relevant':只把目标正文/携带上下文/柏宝书记忆里出现的角色按完整字段下发,
+ *   其余压成一行名单(仅供「是否已建档」判断)。角色多时能省掉绝大部分 token。
+ * - 'all':整库全量下发(旧行为),出现漏判时可一键回退。
+ */
+export type LibraryFilterMode = 'relevant' | 'all';
+
 export interface AutoTagSettings {
   /** 新 AI 正文落地后自动请求模型。 */
   enabled: boolean;
@@ -461,6 +469,8 @@ export interface AutoTagSettings {
   retryCount: number;
   /** 写入 tag 后是否立即调用出图渠道自动生成图片(默认开;关闭则卡片上手动点「生成」)。 */
   autoGenerate: boolean;
+  /** 角色库下发口径,默认 'relevant'(只发本楼相关角色的完整字段);旧配置缺省按 relevant。 */
+  libraryFilter?: LibraryFilterMode;
   /** 可编辑提示词集(破限/后端规范/思维链);空串 = 回落内置默认。 */
   prompts: AutoTagPrompts;
 }
@@ -1195,6 +1205,7 @@ function defaults(): ImageSettings {
       maxImages: 2,
       retryCount: 1,
       autoGenerate: true,
+      libraryFilter: 'relevant',
       prompts: {
         jailbreak: '',
         naiSpec: '',
@@ -1795,6 +1806,11 @@ function normalize(raw: unknown): ImageSettings {
         : d.autoTag.retryCount,
     autoGenerate:
       typeof rt.autoGenerate === 'boolean' ? rt.autoGenerate : d.autoTag.autoGenerate,
+    // 旧数据没有该键:默认走筛选(省 token),用户不满意可切回 all 全量
+    libraryFilter:
+      rt.libraryFilter === 'all' || rt.libraryFilter === 'relevant'
+        ? rt.libraryFilter
+        : d.autoTag.libraryFilter,
     // 可编辑提示词集:逐字段兜底;旧版 jailbreakPrompt 字段迁移进 prompts.jailbreak
     prompts: (() => {
       const rp = (rt.prompts ?? {}) as Partial<AutoTagPrompts>;

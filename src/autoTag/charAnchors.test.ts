@@ -72,6 +72,64 @@ describe('formatEntryForPrompt / buildLibraryText', () => {
   });
 });
 
+describe('library relevance filter', () => {
+  const entries = [
+    entry('苏曼', { characterTraits: '1girl' }),
+    entry('沈若兰', { characterTraits: '1girl' }),
+    entry('林小曼', { characterTraits: '1girl' }),
+    entry('小曼', { characterTraits: '1girl' }),
+    entry('无关角色', { characterTraits: '1boy' }),
+  ];
+
+  it('sends full fields only for characters present in the corpus', () => {
+    const text = buildLibraryText(entries, undefined, { corpus: '苏曼走进房间，沈若兰抬头。' });
+    expect(text).toContain('## 本楼相关（完整字段，可直接照抄）');
+    expect(text).toContain('- 苏曼: 角色特征=1girl');
+    expect(text).toContain('- 沈若兰: 角色特征=1girl');
+    expect(text).toContain('## 其余已建档');
+    // 名单只带名字,不带字段
+    expect(text).toContain('无关角色');
+    expect(text).not.toContain('- 无关角色:');
+  });
+
+  it('masks a short name inside a longer hit', () => {
+    const text = buildLibraryText(entries, undefined, { corpus: '林小曼笑了。' });
+    expect(text).toContain('- 林小曼: 角色特征=1girl');
+    const roster = text.split('## 其余已建档')[1] ?? '';
+    expect(roster).toContain('小曼');
+    expect(text).not.toContain('- 小曼:');
+  });
+
+  it('still matches a short name when it stands alone', () => {
+    const text = buildLibraryText(entries, undefined, { corpus: '小曼笑了。' });
+    expect(text).toContain('- 小曼: 角色特征=1girl');
+  });
+
+  it('always keeps alwaysNames in the full section', () => {
+    const text = buildLibraryText(entries, undefined, { corpus: '雨停了。', alwaysNames: ['苏曼'] });
+    expect(text).toContain('- 苏曼: 角色特征=1girl');
+  });
+
+  it('falls back to the whole library when mode=all or the corpus is blank', () => {
+    expect(buildLibraryText(entries, undefined, { corpus: '苏曼', mode: 'all' })).not.toContain(
+      '其余已建档',
+    );
+    expect(buildLibraryText(entries, undefined, { corpus: '   ' })).not.toContain('其余已建档');
+  });
+
+  it('keeps the locked marker in both sections', () => {
+    const text = buildLibraryText(entries, new Set(['苏曼', '无关角色']), { corpus: '苏曼' });
+    expect(text).toContain('- 苏曼 [locked]:');
+    expect(text).toContain('无关角色 [locked]');
+  });
+
+  it('renders an explicit empty-matched section when nobody hits', () => {
+    const text = buildLibraryText(entries, undefined, { corpus: '谁也没来。' });
+    expect(text).toContain('（本楼没有命中已建档角色。）');
+    expect(text).toContain('## 其余已建档');
+  });
+});
+
 describe('applyCharRefs', () => {
   const entries = [
     entry('小雪', { characterTraits: '1girl', facialFeatures: 'long black hair, red eyes' }),

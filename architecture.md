@@ -199,6 +199,12 @@ runForFloor(floor, opts)
   4. 装配上下文:
      - bookMemory.readBookMemory  → 柏宝书角色参考块(可 null)
      - charAnchors.resolveCharAnchors → 库文本(纯本地渲染,无请求;空库返回 text=null)
+       相关性筛选(默认开,`autoTag.libraryFilter`):按「目标正文 + 携带上下文 + 柏宝书记忆」
+       本地扫名字,命中的角色发全量 11 字段,其余压成一行名单(仅名字,供「是否已建档」判断);
+       `name1`/`name2` 无条件保留全量(剧情常以「你」指代主角,名字不出现)。
+       扫描语料**不含**世界书/角色卡(人名密度过高,会把库拉回全量)。
+       长名优先 + 命中区间遮蔽,避免「小曼」被「林小曼」重复命中。
+       切 `all` 可回退整库全量(旧行为)。
      - prompt.buildAutoTagMessages → 消息数组(见下)
   5. 请求:getTagGenChannel() 有指派渠道 → requestCompletion(服务端代理);
      否则 requestViaMainApi(generateRaw)。**每楼只此一次请求** —— 建档与选图同属一次

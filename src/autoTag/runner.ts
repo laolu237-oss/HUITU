@@ -8,7 +8,7 @@ import {
 import { prepareTargetText } from '@/autoTag/clean';
 import { buildClosetText } from '@/autoTag/closetAnchors';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
-import { autoTagProfile, buildAutoTagMessages } from '@/autoTag/prompt';
+import { autoTagProfile, buildAutoTagMessages, buildLibraryCorpus } from '@/autoTag/prompt';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
 import { buildSlotTaskNote } from '@/autoTag/slotPlan';
 import { closetLib } from '@/state/closet';
@@ -303,8 +303,15 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     const entriesBefore = slot ? charTagsBeforeFloor(floor + 1) : charTagsBeforeFloor(floor);
     // 锁定名(全局库 ⊖ 本聊天基线):AI 的 changes 对这些名字一律无效,库文本里带 [locked] 标记
     const lockedNames = lockedCharTagNames();
-    // 纯本地渲染:建档由主请求在同一次输出里完成(changes 的 field="new")
-    const anchors = resolveCharAnchors(entriesBefore, lockedNames);
+    // 纯本地渲染:建档由主请求在同一次输出里完成(changes 的 field="new")。
+    // 相关性筛选(libraryFilter='relevant'):只把本楼相关角色按完整字段下发,其余压成名单。
+    // 语料 = 目标正文 + 携带上下文 + 柏宝书记忆;玩家与主角色无条件保留全量——
+    // 剧情常用「你」指代主角,名字根本不出现,只靠扫描会漏掉他。
+    const anchors = resolveCharAnchors(entriesBefore, lockedNames, {
+      corpus: buildLibraryCorpus(context, floor, settings.autoTag, preparedTarget, memory),
+      alwaysNames: [context.name1, context.name2],
+      mode: settings.autoTag.libraryFilter ?? 'relevant',
+    });
     // 单槽重写:协议强制「恰好 1 张」,并把该槽位当前提示词与其余槽位摘要带给模型
     // (锚住同一个画面、别抢别人的画面)。min/max 要同时覆盖 build 的规则文案与下面的
     // parse 校验,只改一处会自相矛盾。

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { autoTagProfile, buildAutoTagMessages, expandNlSections } from '@/autoTag/prompt';
+import { autoTagProfile, buildAutoTagMessages, buildLibraryCorpus, expandNlSections } from '@/autoTag/prompt';
+import { prepareTargetText } from '@/autoTag/clean';
 import {
   activeComfyPreset,
   DEFAULT_JAILBREAK_PROMPT,
@@ -69,6 +70,42 @@ function context(): STContext {
     },
   };
 }
+
+describe('buildLibraryCorpus', () => {
+  it('covers the target, carried context floors and book memory only', () => {
+    const ctx: STContext = {
+      ...context(),
+      chat: [
+        { name: 'User', is_user: true, is_system: false, mes: '更早的一楼：赵文斌出场' },
+        { name: 'Char', is_user: false, is_system: false, mes: '第一段剧情：沈若兰在窗边' },
+        { name: 'User', is_user: true, is_system: false, mes: '你走进房间' },
+        { name: 'Char', is_user: false, is_system: false, mes: '目标正文：苏曼抬头' },
+      ],
+    };
+    const options: AutoTagSettings = {
+      enabled: true,
+      contextMessages: 2,
+      minImages: 0,
+      maxImages: 1,
+      retryCount: 0,
+      autoGenerate: false,
+      prompts: prompts(),
+    };
+    const prepared = prepareTargetText(ctx.chat[3].mes, []);
+    const corpus = buildLibraryCorpus(ctx, 3, options, prepared, {
+      timing: 'before_latest',
+      text: '角色参考：苏曼在场',
+      roles: [],
+    });
+
+    expect(corpus).toContain('第一段剧情：沈若兰在窗边');
+    expect(corpus).toContain('你走进房间');
+    expect(corpus).toContain('目标正文：苏曼抬头');
+    expect(corpus).toContain('角色参考：苏曼在场');
+    // 超出「最近 N 个 AI 楼」的更早楼层不参与筛选,避免把历史人物全捞进来
+    expect(corpus).not.toContain('赵文斌');
+  });
+});
 
 describe('auto tag prompt', () => {
   it('marks only clean target paragraphs without pulling user messages before the earliest selected AI floor', async () => {

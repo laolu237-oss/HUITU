@@ -143,6 +143,32 @@ function roleLabel(context: STContext, floor: number): string {
   return `assistant（${message.name || context.name2 || 'Assistant'}）`;
 }
 
+/**
+ * 角色库相关性筛选的扫描语料。
+ *
+ * 口径与请求实际携带的剧情材料一致:目标正文(已清洗、含段尾 P 编号) +
+ * 携带的上下文楼(同 contextMessages 口径,同一套清洗) + 柏宝书记忆文本。
+ *
+ * **刻意不含**角色卡、世界书与人设:那是设定库不是剧情,人名密度极高,
+ * 扫进去几乎会把整库都判成「本楼相关」,筛选就白做了。它们在请求里照常下发,
+ * 只是不参与「谁在场」的判断。
+ */
+export function buildLibraryCorpus(
+  context: STContext,
+  targetFloor: number,
+  options: AutoTagSettings,
+  preparedTarget: PreparedTargetText,
+  memory: BookMemoryContext | null,
+): string {
+  const parts = [preparedTarget.promptText];
+  for (const floor of recentFloors(context, targetFloor, options.contextMessages)) {
+    if (floor === targetFloor) continue;
+    parts.push(cleanHistoryText(context.chat[floor].mes, settings.excludes.customStripTags));
+  }
+  if (memory?.text) parts.push(memory.text);
+  return parts.join('\n');
+}
+
 export async function buildAutoTagMessages(
   context: STContext,
   targetFloor: number,
@@ -286,7 +312,7 @@ export async function buildAutoTagMessages(
   const newCharacterRule = `
    - **建档先于画图**：先通读目标正文，找出每个有名有姓、且【角色固定外貌库】里还没有的正式角色——只要角色卡、世界书、柏宝书或持续剧情为他给出了设定，或他是持续参与剧情的角色，首次出场就必须建档，不论他是否入选本次图片。判断依据是发给你的全部设定内容，由你自己通读判断。一次性无名路人不建。
    - **建档资格与入画资格是两回事**：不建档只表示他不进角色库，不表示他不能入画；已建档也不表示他必须入画。先按本图的主体和核心互动取景，再为镜头内的人写外貌，不按档案状态决定取舍。无名角色若是核心互动的参与者，照常入画，不得仅因缺档案放弃画面、改选瞬间或裁掉他；仅仅在场不构成入画理由，无关在场者可以留在镜头外。
-   - “已建档”只能按【角色固定外貌库】区块中的同名条目判断：只有名字实际列在该区块中才算已建档；世界书、角色卡、柏宝书或正文里的详细设定只是建档依据，绝不等于已经在库。每个在场正式角色必须二选一：指出库中的同名条目，或在 changes 中输出 field:"new"。一次性无名角色不在这条二选一之内：他既不建档也不写 changes，不需要指出任何库条目，缺档案是正常状态而非遗漏。
+   - “已建档”只能按【角色固定外貌库】区块中的同名条目判断：只有名字实际列在该区块中才算已建档；世界书、角色卡、柏宝书或正文里的详细设定只是建档依据，绝不等于已经在库。每个在场正式角色必须二选一：指出库中的同名条目，或在 changes 中输出 field:"new"。一次性无名角色不在这条二选一之内：他既不建档也不写 changes，不需要指出任何库条目，缺档案是正常状态而非遗漏。区块里「其余已建档」名单中的名字同样算已建档（只是本轮未附字段，且这些角色未在本楼正文出现，不要为它们输出 changes 或 field:"new"）。
    - 建档写法：{"name":"角色名","field":"new","fields":{"characterTraits":"...","facialFeatures":"..."},"position":"P2","reason":"首次出场建档"}；position 填他首次出现的位置，仅作记录——建档在本楼全程有效，本楼任意位置的图片都可以立即使用这套外貌。
    - 建档字段只放**长期不变的身体特征**：11 字段按以下顺序填——characterTraits(角色特征/同人身份 tag)/facialFeatures(面部 正)/facialFeaturesBack(面部 背)/upperBodySFW(上身 SFW 正)/upperBodySFWBack(上身 SFW 背)/fullBodySFW(下身 SFW 正)/fullBodySFWBack(下身 SFW 背)/upperBodyNSFW(上身 NSFW 正)/upperBodyNSFWBack(上身 NSFW 背)/fullBodyNSFW(下身 NSFW 正)/fullBodyNSFWBack(下身 NSFW 背)；**任何字段都不得写服装**——服装一律不入库，女性角色从【服装库】挑、男性角色按剧情生成；判定为同人角色的，characterTraits 必须写同人身份 tag(模型可识别的英文 Danbooru 身份 tag，格式 character name (copyright name))，原创角色的 characterTraits 写「22yo, chinese girl, elegant, refined beauty」这样的身份特征描述。动作、姿势、所在场景、临时状态(lying on carpet、standing、sitting、unzipped、湿身、伤势等)一律不得写进任何字段——档案会在他之后每一张图里被照抄，把姿势写进去会让他在所有画面里都保持那个姿势。
    - 建档取值优先级：目标正文明确的当前外貌 > 柏宝书当前角色状态 > 角色卡/世界书明确人设 > 合理补全。人设明确写了颜色时必须原样转换，不得擅改；characterTraits 与 facialFeatures 至少填一项(同人身份 tag 写在 characterTraits)，缺任一项该条建档会被丢弃。   - 如果设定没写发色、发型或瞳色，根据世界观、种族、身份、性格和其余角色设定补出简洁、协调、可长期复用的颜色与发型；这是一次性建档决定，后续不得重新随机。
