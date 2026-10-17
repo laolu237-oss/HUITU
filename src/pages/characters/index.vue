@@ -50,7 +50,7 @@ import { fetchComfyModelLists } from '@/backends/comfyObjectInfo';
 import { settings } from '@/state/settings';
 import { listUserImageFolders, listUserImages, uploadUserImage } from '@/st/images';
 import { phoneAppearanceMissHint, readPhoneAppearance } from '@/st/phoneAppearance';
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 
 /**
  * 角色管理 —— 两层固定外貌库:
@@ -87,10 +87,42 @@ const draftDesc = ref('');
 const regenerating = ref(false);
 // 收藏:列表里置顶显示,纯用户偏好
 const draftFavorite = ref(false);
-// 外貌字段分组:SFW 两列平铺,NSFW 默认折叠(11 个全平铺会把弹窗撑到 1100px)
+// 外貌字段分组:SFW 两列平铺,NSFW 单独一页
 const SFW_FIELDS = CHAR_TAG_FIELDS.filter(field => !field.includes('NSFW'));
 const NSFW_FIELDS = CHAR_TAG_FIELDS.filter(field => field.includes('NSFW'));
-const nsfwOpen = ref(false);
+/** 弹窗分组页签:外貌字段 / NSFW / LoRA。最终预览固定底部,不随页签切换。 */
+const DIALOG_TABS = [
+  { key: 'fields', label: '外貌字段' },
+  { key: 'nsfw', label: 'NSFW' },
+  { key: 'lora', label: 'LoRA' },
+] as const;
+type DialogTab = (typeof DIALOG_TABS)[number]['key'];
+const dialogTab = ref<DialogTab>('fields');
+/* 「更多」下拉:选中即执行,执行完立刻清空(不清的话同一项连点第二次不会触发 change)。 */
+const moreAction = ref('');
+const moreOptions = computed(() => {
+  const items: Array<{ value: string; label: string; icon?: string }> = [
+    { value: 'clear', label: '清空所有提示词', icon: 'edit' },
+    { value: 'import-phone', label: '从手机 UI 导入', icon: 'download' },
+    { value: 'regen', label: '从柏宝书生成', icon: 'refresh' },
+  ];
+  if (editingName.value && editingScope.value === 'chat') {
+    items.unshift({ value: 'promote', label: '提升为全局', icon: 'star' });
+  }
+  if (editingName.value && editingScope.value === 'global') {
+    items.unshift({ value: 'copy', label: '复制到本聊天', icon: 'copy' });
+  }
+  return items;
+});
+watch(moreAction, value => {
+  if (!value) return;
+  moreAction.value = '';
+  if (value === 'clear') askClearAll();
+  else if (value === 'import-phone') void importFromPhoneUI();
+  else if (value === 'regen') void regenerateFromBook();
+  else if (value === 'promote') askPromote();
+  else if (value === 'copy') copyToChat();
+});
 
 /* —— 角色专属 LoRA ——
  * 绑定挂在角色条目上:只有该角色出现在画面里时,出图才挂载这个 LoRA 并把触发词拼进
@@ -463,7 +495,7 @@ function openEntry(entry: CharTagEntry, scope: Scope) {
   draftLoraStrength.value = entry.lora?.strength ?? 1;
   draftLoraTrigger.value = entry.lora?.trigger ?? '';
   draftFavorite.value = entry.favorite === true;
-  nsfwOpen.value = false;
+  dialogTab.value = 'fields';
   void ensureLoraOptions();
   historyOpen.value = false;
 }
@@ -479,7 +511,7 @@ function addEntry(scope: Scope = 'chat') {
   draftLoraStrength.value = 1;
   draftLoraTrigger.value = '';
   draftFavorite.value = false;
-  nsfwOpen.value = false;
+  dialogTab.value = 'fields';
   void ensureLoraOptions();
   historyOpen.value = false;
 }
@@ -1382,7 +1414,10 @@ function confirmClearAll(): void {
         <!-- 行动栏:原本挂在弹窗底部,编辑长字段(11 外貌 + 整串 + nl)时
              滑到底才能点「完成 / 清空 / 删除」,来回滚动成本太高。
              整组提到标题正下方, position: sticky 让滚长表单时也常驻视口顶部,
-             关闭按钮移到 header 右上保留,避免双重动作区。 -->
+             关闭按钮移到 header 右上保留,避免双重动作区。
+             [v13·2026-10-17] 七个按钮一行放不下、换成两行更挤:只留高频的
+             「收藏 / 删除 / 完成」,其余全收进「更多」下拉(BbiSelect 菜单走
+             modalHost,不会被弹窗裁掉)。 -->
         <div class="bbi-char-edit-toolbar">
           <div class="bbi-modal-foot">
             <button
@@ -1397,50 +1432,14 @@ function confirmClearAll(): void {
             <button v-if="editingName" class="bbi-btn bbi-btn-danger" type="button" @click="askRemove">
               <Icon name="trash" /> 删除
             </button>
-            <button
-              class="bbi-btn"
-              type="button"
-              title="清空所有提示词字段(11 字段 + 整串 + 自然语言 + 描述),角色名保留"
-              @click="askClearAll"
-            >
-              <Icon name="edit" /> 清空所有提示词
-            </button>
             <span class="bbi-modal-foot-spacer"></span>
-            <button
-              v-if="editingName && editingScope === 'chat'"
-              class="bbi-btn"
-              type="button"
-              title="把当前外貌快照进全局库,所有聊天生效;本聊天副本与变更记录将清除"
-              @click="askPromote"
-            >
-              <Icon name="star" /> 提升为全局
-            </button>
-            <button
-              v-if="editingName && editingScope === 'global'"
-              class="bbi-btn"
-              type="button"
-              title="复制为本聊天副本:之后本聊天以副本为准,AI 可对其变更"
-              @click="copyToChat"
-            >
-              <Icon name="copy" /> 复制到本聊天
-            </button>
-            <button
-              class="bbi-btn"
-              type="button"
-              title="读取柏宝书最新状态里该角色的外貌,重新转换成字段"
-              :disabled="regenerating"
-              @click="regenerateFromBook"
-            >
-              <Icon name="refresh" /> {{ regenerating ? '生成中…' : '从柏宝书生成' }}
-            </button>
-            <button
-              class="bbi-btn"
-              type="button"
-              title="从手机UI角色外观缓存导入该角色的全部 11 字段(同名覆盖,不同名追加)"
-              @click="importFromPhoneUI"
-            >
-              <Icon name="download" /> 从手机UI导入
-            </button>
+            <BbiSelect
+              v-model="moreAction"
+              :options="moreOptions"
+              placeholder="更多"
+              aria-label="更多操作"
+              class="bbi-char-more"
+            />
             <button class="bbi-btn bbi-btn-primary" type="button" @click="confirmEntry">完成</button>
           </div>
         </div>
@@ -1477,119 +1476,140 @@ function confirmClearAll(): void {
         </label>
         <span class="bbi-field-hint">按这个名字去正文和柏宝书角色参考里匹配;AI 引用时也用它(@角色名)。改名不会自动跟随。</span>
 
-        <div class="bbi-modal-field">
-          <span class="bbi-modal-label">
-            外貌字段
-            <span v-if="draftLoraMode" class="bbi-char-pill is-lora" title="已绑定 LoRA:外貌字段不会发送给 AI">不发送</span>
-          </span>
-          <div class="bbi-char-form bbi-char-form--grid">
-            <label v-for="f in SFW_FIELDS" :key="f" class="bbi-char-form-cell">
-              <span class="bbi-char-form-label">{{ CHAR_TAG_FIELD_LABELS[f] }}</span>
-              <BbiTextarea
-                v-model="draft.fields[f]"
-                :rows="2"
-                :max-rows="6"
-                mono
-                :placeholder="FIELD_PLACEHOLDERS[f]"
-                @input="markManual"
-              />
-            </label>
-          </div>
+        <!-- 分组页签:外貌字段 / NSFW / LoRA 三选一显示,点一下切换。
+             最终预览固定在弹窗底部,不随页签切换(见文件末尾)。 -->
+        <nav class="bbi-char-tabs" aria-label="编辑分组">
           <button
-            class="bbi-char-nsfw-toggle"
+            v-for="tab in DIALOG_TABS"
+            :key="tab.key"
+            class="bbi-char-tab"
+            :class="{ 'is-on': dialogTab === tab.key }"
             type="button"
-            :aria-expanded="nsfwOpen"
-            @click="nsfwOpen = !nsfwOpen"
+            :aria-selected="dialogTab === tab.key"
+            @click="dialogTab = tab.key"
           >
-            <span class="bbi-char-history-caret" :class="{ 'is-open': nsfwOpen }"><Icon name="chevron" /></span>
-            NSFW 字段 {{ NSFW_FIELDS.length }} 项
-            <span class="bbi-char-nsfw-hint">{{ nsfwOpen ? '收起' : '展开' }}</span>
+            {{ tab.label }}
+            <span v-if="tab.key === 'nsfw'" class="bbi-char-tab-count">{{ NSFW_FIELDS.length }}</span>
           </button>
-          <div v-if="nsfwOpen" class="bbi-char-form bbi-char-form--grid">
-            <label v-for="f in NSFW_FIELDS" :key="f" class="bbi-char-form-cell">
-              <span class="bbi-char-form-label">{{ CHAR_TAG_FIELD_LABELS[f] }}</span>
-              <BbiTextarea
-                v-model="draft.fields[f]"
-                :rows="2"
-                :max-rows="6"
-                mono
-                :placeholder="FIELD_PLACEHOLDERS[f]"
-                @input="markManual"
-              />
-            </label>
-          </div>
-        </div>
-        <span class="bbi-field-hint">只写固定基础特征;服装、表情、动作不入库,每次按剧情生成。</span>
+        </nav>
 
-        <label class="bbi-modal-field">
-          <span class="bbi-modal-label">
-            整串模式(可选)
-            <span v-if="draftLoraMode" class="bbi-char-pill is-lora" title="已绑定 LoRA:整串不会发送给 AI">不发送</span>
+        <!-- 页签一:外貌字段 + 整串 + 自然语言 -->
+        <template v-if="dialogTab === 'fields'">
+          <div class="bbi-modal-field">
+            <span class="bbi-modal-label">
+              外貌字段
+              <span v-if="draftLoraMode" class="bbi-char-pill is-lora" title="已绑定 LoRA:外貌字段不会发送给 AI">不发送</span>
+            </span>
+            <div class="bbi-char-form bbi-char-form--grid">
+              <label v-for="f in SFW_FIELDS" :key="f" class="bbi-char-form-cell">
+                <span class="bbi-char-form-label">{{ CHAR_TAG_FIELD_LABELS[f] }}</span>
+                <BbiTextarea
+                  v-model="draft.fields[f]"
+                  :rows="2"
+                  :max-rows="6"
+                  mono
+                  :placeholder="FIELD_PLACEHOLDERS[f]"
+                  @input="markManual"
+                />
+              </label>
+            </div>
+          </div>
+          <span class="bbi-field-hint">只写固定基础特征;服装、表情、动作不入库,每次按剧情生成。</span>
+
+          <label class="bbi-modal-field">
+            <span class="bbi-modal-label">
+              整串模式(可选)
+              <span v-if="draftLoraMode" class="bbi-char-pill is-lora" title="已绑定 LoRA:整串不会发送给 AI">不发送</span>
+            </span>
+            <BbiTextarea
+              v-model="draft.raw"
+              :rows="2"
+              :max-rows="6"
+              mono
+              placeholder="留空则用上面的字段拼接;整串模式优先于字段,填了整串字段就不发送"
+              @input="markManual"
+            />
+          </label>
+
+          <label class="bbi-modal-field">
+            <span class="bbi-modal-label">自然语言外貌(可选)</span>
+            <BbiTextarea
+              v-model="draft.nl"
+              :rows="2"
+              :max-rows="4"
+              mono
+              placeholder="一句连贯英文外貌描述,自然语言模式下替换 nl 里的 @角色名 用;留空则用 tag 串替换"
+              @input="markManual"
+            />
+          </label>
+        </template>
+
+        <!-- 页签二:NSFW 字段 -->
+        <template v-else-if="dialogTab === 'nsfw'">
+          <div class="bbi-modal-field">
+            <span class="bbi-modal-label">NSFW 字段</span>
+            <div class="bbi-char-form bbi-char-form--grid">
+              <label v-for="f in NSFW_FIELDS" :key="f" class="bbi-char-form-cell">
+                <span class="bbi-char-form-label">{{ CHAR_TAG_FIELD_LABELS[f] }}</span>
+                <BbiTextarea
+                  v-model="draft.fields[f]"
+                  :rows="2"
+                  :max-rows="6"
+                  mono
+                  :placeholder="FIELD_PLACEHOLDERS[f]"
+                  @input="markManual"
+                />
+              </label>
+            </div>
+          </div>
+          <span class="bbi-field-hint">只写固定基础特征;服装、表情、动作不入库,每次按剧情生成。</span>
+        </template>
+
+        <!-- 页签三:角色专属 LoRA -->
+        <template v-else>
+          <div class="bbi-modal-field">
+            <span class="bbi-modal-label">LoRA 挂载(可选)</span>
+            <div class="bbi-char-form bbi-char-form--list">
+              <label class="bbi-char-form-row bbi-char-form-row--full">
+                <span class="bbi-char-form-label">LoRA 文件</span>
+                <BbiCombo
+                  v-model="draftLoraName"
+                  :options="loraOptions"
+                  placeholder="留空 = 不绑定;可从 ComfyUI 的 models/loras 里选"
+                  aria-label="LoRA 文件"
+                />
+              </label>
+              <label class="bbi-char-form-row bbi-char-form-row--full">
+                <span class="bbi-char-form-label">强度</span>
+                <input
+                  v-model.number="draftLoraStrength"
+                  class="bbi-input"
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                />
+              </label>
+              <label class="bbi-char-form-row bbi-char-form-row--full">
+                <span class="bbi-char-form-label">触发词</span>
+                <input
+                  v-model="draftLoraTrigger"
+                  class="bbi-input"
+                  placeholder="如 adnim, 1girl, long hair, grey eyes;整串会完整写入,不会省略"
+                />
+              </label>
+            </div>
+          </div>
+          <span class="bbi-field-hint">
+            只有该角色出现在画面里时才挂载这个 LoRA;触发词串会<strong>完整写入</strong>正向提示词(缺失的词自动补齐,已有的不重复)。
+            渠道里同名的 LoRA 会被自动剔除。仅 ComfyUI「简易参数」模式生效(自定义工作流请在渠道页自行挂载)。
           </span>
-          <BbiTextarea
-            v-model="draft.raw"
-            :rows="2"
-            :max-rows="6"
-            mono
-            placeholder="留空则用上面的字段拼接;填了整串且字段全空时,以整串为准(旧数据格式)"
-            @input="markManual"
-          />
-        </label>
+          <p v-if="draftLoraMode" class="bbi-field-hint bbi-char-lora-active">
+            当前为 <strong>LoRA 模式</strong>:外貌字段与整串<strong>不会发送</strong>给 AI,只发送触发词串(优先级:LoRA &gt; 整串 &gt; 外貌字段)。
+          </p>
+        </template>
 
-        <label class="bbi-modal-field">
-          <span class="bbi-modal-label">自然语言外貌(可选)</span>
-          <BbiTextarea
-            v-model="draft.nl"
-            :rows="2"
-            :max-rows="4"
-            mono
-            placeholder="一句连贯英文外貌描述,自然语言模式下替换 nl 里的 @角色名 用;留空则用 tag 串替换"
-            @input="markManual"
-          />
-        </label>
-
-        <!-- 角色专属 LoRA:只在角色出现在画面里时挂载,避免同框角色互相污染 -->
-        <div class="bbi-modal-field">
-          <span class="bbi-modal-label">LoRA 挂载(可选)</span>
-          <div class="bbi-char-form bbi-char-form--list">
-            <label class="bbi-char-form-row bbi-char-form-row--full">
-              <span class="bbi-char-form-label">LoRA 文件</span>
-              <BbiCombo
-                v-model="draftLoraName"
-                :options="loraOptions"
-                placeholder="留空 = 不绑定;可从 ComfyUI 的 models/loras 里选"
-                aria-label="LoRA 文件"
-              />
-            </label>
-            <label class="bbi-char-form-row bbi-char-form-row--full">
-              <span class="bbi-char-form-label">强度</span>
-              <input
-                v-model.number="draftLoraStrength"
-                class="bbi-input"
-                type="number"
-                min="0"
-                max="2"
-                step="0.05"
-              />
-            </label>
-            <label class="bbi-char-form-row bbi-char-form-row--full">
-              <span class="bbi-char-form-label">触发词</span>
-              <input
-                v-model="draftLoraTrigger"
-                class="bbi-input"
-                placeholder="如 adnim, 1girl, long hair, grey eyes;整串会完整写入,不会省略"
-              />
-            </label>
-          </div>
-        </div>
-        <span class="bbi-field-hint">
-          只有该角色出现在画面里时才挂载这个 LoRA;触发词串会<strong>完整写入</strong>正向提示词(缺失的词自动补齐,已有的不重复)。
-          渠道里同名的 LoRA 会被自动剔除。仅 ComfyUI「简易参数」模式生效(自定义工作流请在渠道页自行挂载)。
-        </span>
-        <p v-if="draftLoraMode" class="bbi-field-hint bbi-char-lora-active">
-          当前为 <strong>LoRA 模式</strong>:外貌字段与整串<strong>不会发送</strong>给 AI,只发送触发词串(优先级:LoRA &gt; 整串 &gt; 外貌字段)。
-        </p>
-
+        <!-- 最终预览:固定在底部,不随页签切换 -->
         <div class="bbi-char-preview">
           <span class="bbi-field-label">最终 tag 预览</span>
           <code class="bbi-char-preview-tag">{{ previewTag || '(空)' }}</code>
@@ -2133,195 +2153,14 @@ function confirmClearAll(): void {
   gap: 4px;
   min-width: 0;
 }
-.bbi-char-nsfw-toggle {
-  margin-top: 10px;
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 10px;
-  border: 1px dashed var(--bbi-line);
-  border-radius: var(--bbi-radius);
-  background: transparent;
-  color: var(--bbi-ink-muted);
-  font-family: var(--bbi-font-sans);
-  font-size: 12.5px;
-  cursor: pointer;
-}
-.bbi-char-nsfw-toggle:hover {
-  color: var(--bbi-ink);
-  border-color: var(--bbi-accent);
-}
-.bbi-char-nsfw-hint {
-  margin-left: auto;
-  color: var(--bbi-accent);
-}
-@media (max-width: 640px) {
-  .bbi-char-form--grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* —— 角色卡片网格 —— */
-.bbi-char-grid {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 10px;
-}
-.bbi-char-card {
-  min-width: 0;
-}
-.bbi-char-card-btn {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px;
-  border: 1px solid var(--bbi-line);
-  border-radius: var(--bbi-radius);
-  background: var(--bbi-surface);
-  color: var(--bbi-ink);
-  font-family: var(--bbi-font-sans);
-  cursor: pointer;
-  text-align: left;
-  transition:
-    border-color var(--bbi-dur) var(--bbi-ease),
-    box-shadow var(--bbi-dur) var(--bbi-ease),
-    transform var(--bbi-dur) var(--bbi-ease);
-}
-.bbi-char-card-btn:hover {
-  border-color: var(--bbi-accent);
-  box-shadow: 0 8px 20px -12px var(--bbi-overlay);
-  transform: translateY(-1px);
-}
-.bbi-char-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-}
-.bbi-char-name {
-  font-size: 15px;
-  font-weight: 600;
-  word-break: break-word;
-  min-width: 0;
-}
-.bbi-char-pills {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* —— 徽标药丸:全局=实心强调;柏宝书/AI=强调浅底;手动=弱化;覆盖=警示色 —— */
-.bbi-char-pill {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 9px;
-  border-radius: var(--bbi-radius-pill);
-  color: var(--bbi-ink-muted);
-  background: var(--bbi-surface-2);
-  border: 1px solid var(--bbi-line);
-  white-space: nowrap;
-}
-.bbi-char-pill.is-global {
-  color: var(--bbi-accent-ink);
-  background: var(--bbi-accent);
-  border-color: transparent;
-}
-.bbi-char-pill.is-chat {
-  color: var(--bbi-ink-soft);
-}
-/* LoRA 绑定徽标:与来源徽标区分开,用中性描边样式,不抢强调色 */
-.bbi-char-pill.is-lora {
-  color: var(--bbi-ink-soft);
-  background: transparent;
-  border-color: var(--bbi-line);
-  letter-spacing: 0.02em;
-}
-/* 收藏星标 */
-.bbi-char-pill.is-fav {
-  color: var(--bbi-warning);
-  background: var(--bbi-warning-soft);
-  border-color: transparent;
-}
-.bbi-char-pill.is-book,
-.bbi-char-pill.is-ai {
-  color: var(--bbi-accent);
-  background: var(--bbi-accent-soft);
-  border-color: transparent;
-}
-.bbi-char-pill.is-override {
-  color: var(--bbi-warning);
-  background: var(--bbi-warning-soft);
-  border-color: transparent;}
-
-/* —— 字段 chips:两行封顶,超出裁切 —— */
-.bbi-char-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-height: 52px;
-  overflow: hidden;
-}
-.bbi-chip {
-  font-family: var(--bbi-font-mono);
-  font-size: 11px;
-  padding: 3px 9px;
-  border-radius: var(--bbi-radius-pill);
-  background: var(--bbi-surface-2);
-  color: var(--bbi-ink-soft);
-  border: 1px solid var(--bbi-line);
-  white-space: nowrap;
-}
-/* [v11·2026-10-14] 卡片 chip 「+N」徽标:中性灰,提示折叠字段数 */
-.bbi-chip.is-more {
-  background: transparent;
-  color: var(--bbi-ink-muted);
-  border-color: var(--bbi-line);
-  font-weight: 700;
-}
-/* 整串模式:mono 小字两行截断 */
-.bbi-char-raw {
-  font-family: var(--bbi-font-mono);
-  font-size: 12px;
-  color: var(--bbi-ink-muted);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  word-break: break-word;
-}
-.bbi-char-history-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-family: var(--bbi-font-mono);
-  font-size: 11px;
-  color: var(--bbi-ink-muted);
-}
-
-/* —— 弹窗加宽,容纳两列字段表单 —— */
+/* —— 弹窗表单:LoRA 页走列表行,外貌/NSFW 页走上面的两列网格 —— */
 .bbi-char-modal {
   max-width: 680px;
 }
-
-/* —— 字段表单:两列网格(默认 8 字段)、列表(11 字段) —— */
-.bbi-char-form {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px 12px;
-}
-/* [v11·2026-10-14] 11 字段改成单列列表,每行 textarea 自适应高度 */
 .bbi-char-form--list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .bbi-char-form-row {
   display: flex;
@@ -2329,95 +2168,55 @@ function confirmClearAll(): void {
   gap: 4px;
   min-width: 0;
 }
-.bbi-char-form-row.is-wide {
-  grid-column: 1 / -1;
-}
-.bbi-char-form-row--full {
-  width: 100%;
-}
 .bbi-char-form-label {
   font-size: 12px;
-  font-weight: 600;
-  color: var(--bbi-ink-soft);
+  color: var(--bbi-ink-muted);
 }
 
-/* —— 弹窗内历史面板 —— */
-.bbi-char-history {
+/* —— 编辑弹窗分组页签:外貌字段 / NSFW / LoRA,点一下切换 —— */
+.bbi-char-tabs {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.bbi-char-history-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  align-self: flex-start;
-  border: 0;
-  background: none;
-  padding: 2px 6px;
-  color: var(--bbi-ink-muted);
-  font-size: 12px;
-  font-family: var(--bbi-font-sans);
-  cursor: pointer;
-  border-radius: var(--bbi-radius-sm);
-}
-.bbi-char-history-toggle:hover {
-  color: var(--bbi-accent);
-  background: var(--bbi-surface-2);
-}
-.bbi-char-history-caret {
-  display: inline-flex;
-  transition: transform var(--bbi-dur) var(--bbi-ease);
-}
-.bbi-char-history-caret.is-open {
-  transform: rotate(180deg);
-}
-.bbi-char-history-list {
-  list-style: none;
-  margin: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--bbi-line);
-  border-radius: var(--bbi-radius-sm);
-  background: var(--bbi-surface-2);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-height: 240px;
-  overflow-y: auto;
-}
-.bbi-char-history-item {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-}
-.bbi-char-history-main {
-  display: flex;
-  flex-direction: column;
   gap: 2px;
-  min-width: 0;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--bbi-line);
 }
-.bbi-char-history-field {
+.bbi-char-tab {
+  position: relative;
+  padding: 7px 12px;
+  border: none;
+  background: transparent;
+  color: var(--bbi-ink-muted);
+  font-family: var(--bbi-font-sans);
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.bbi-char-tab:hover {
+  color: var(--bbi-ink);
+}
+.bbi-char-tab.is-on {
+  color: var(--bbi-accent);
+  border-bottom-color: var(--bbi-accent);
+  font-weight: 500;
+}
+.bbi-char-tab-count {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bbi-line);
+  color: var(--bbi-ink-muted);
   font-size: 11px;
-  font-weight: 600;
+}
+.bbi-char-tab.is-on .bbi-char-tab-count {
+  background: var(--bbi-accent-soft);
   color: var(--bbi-accent);
 }
-.bbi-char-history-change {
-  font-family: var(--bbi-font-mono);
-  font-size: 12px;
-  color: var(--bbi-ink);
-  word-break: break-word;
-}
-.bbi-char-history-reason {
-  font-size: 12px;
-  color: var(--bbi-ink-muted);
-}
-.bbi-char-history-meta {
-  font-size: 11px;
-  color: var(--bbi-ink-muted);
+/* 工具条里的「更多」下拉:和按钮同高、别把完成顶出去 */
+.bbi-char-more {
+  min-width: 92px;
 }
 
-/* —— 最终 tag 预览 —— */
 .bbi-char-preview {
   display: flex;
   align-items: center;
@@ -2733,10 +2532,7 @@ function confirmClearAll(): void {
 }
 
 @media (max-width: 640px) {
-  .bbi-char-grid {
-    grid-template-columns: 1fr;
-  }
-  .bbi-char-form {
+  .bbi-char-form--grid {
     grid-template-columns: 1fr;
   }
   .bbi-char-name {
