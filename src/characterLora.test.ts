@@ -5,6 +5,7 @@ import {
   ensureVerbatimItems,
   mergeCharacterLoras,
   resolveCharacterLoras,
+  stripCharacterNameTags,
 } from '@/characterLora';
 import { emptyCharFields, type CharTagEntry, type CharTagLora } from '@/state/charTags';
 
@@ -69,6 +70,32 @@ describe('ensureVerbatimItems', () => {
   it('ignores underscore/space differences when deduping', () => {
     const out = ensureVerbatimItems('long_hair, smile', [{ text: 'long hair, breasts' }]);
     expect(out).toBe('long_hair, smile, breasts');
+  });
+});
+
+describe('stripCharacterNameTags', () => {
+  it('removes bare names and the「名字 (触发词)」noise', () => {
+    const out = stripCharacterNameTags(
+      'firefly, adnim, 2girls, firefly (honkai star rail), long hair, User (adnim), grey eyes, User',
+      [{ name: 'User', triggerToken: 'adnim' }],
+    );
+    expect(out).not.toContain('User');
+    // 真正的身份 tag 保留
+    expect(out).toContain('firefly (honkai star rail)');
+  });
+
+  it('keeps an identity tag whose parenthetical is a work name', () => {
+    expect(
+      stripCharacterNameTags('firefly (honkai star rail)', [
+        { name: 'firefly', triggerToken: 'adnim' },
+      ]),
+    ).toBe('firefly (honkai star rail)');
+  });
+
+  it('strips escaped-paren noise too', () => {
+    expect(
+      stripCharacterNameTags('User \\(adnim\\), smile', [{ name: 'User', triggerToken: 'adnim' }]),
+    ).toBe('smile');
   });
 });
 

@@ -525,6 +525,7 @@ tag（JSON 的 tag 键）：danbooru 短 tag——英文小写、逗号分隔的
 - 若角色明确来自已有动漫、游戏、小说等作品，必须在人数/构图之后、普通外貌之前写模型可识别的英文 Danbooru 身份 tag，格式为 character name \\(copyright name\\)。角色名与作品名使用其通行英文 tag，不得直译中文、缩写作品名或只写角色名。
 - ComfyUI 会把未转义圆括号当作权重语法，所以身份 tag 的括号必须转义。实际提示词形态为 character name \\(copyright name\\)；由于最终输出是 JSON，tag 字符串中必须写成 "character name \\\\(copyright name\\\\)"，JSON 解析后才会保留单个反斜杠。
 - 原创角色不写身份 tag；无法从角色卡、世界书或正文可靠确定作品时不得猜测作品名，按原创角色处理。
+- 角色库条目名（如 User、林知意）不是 danbooru tag，**不得写进 tag**；身份 tag 的括号里只能是作品名，不得填 LoRA 触发词（如 adnim）或其他非作品名——触发词由插件另行拼入，不要拿它当作品名。
 - 角色固定外貌库条目的 characterTraits 字段只作档案记录，画图时不照抄它；同人身份 tag 一律按本规范现场判定并转义。
 
 多人画面（两人及以上）额外规则：

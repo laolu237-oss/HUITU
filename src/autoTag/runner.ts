@@ -27,7 +27,7 @@ import {
   type CharTagEntry,
   type CharTagField,
 } from '@/state/charTags';
-import { ensureVerbatimItems, type VerbatimSource } from '@/characterLora';
+import { ensureVerbatimItems, stripCharacterNameTags, type VerbatimSource } from '@/characterLora';
 import { injectImageTags, parseImagePlan, type ImagePlan } from '@/autoTag/protocol';
 import {
   clearAutoGenerateForFloor,
@@ -505,6 +505,16 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           for (const n of charNl.unknown) unknownNames.add(n);
         }
       }
+      // 角色名不是 tag:模型偶尔会把库条目名(或「名字 (触发词)」)写成身份 tag,
+      // 对生图模型是无意义噪声。只删裸名字与「名字 (该角色触发词)」,真正的身份 tag 保留。
+      const noise = (image.names ?? []).flatMap(name => {
+        const entry = anchors.entries.find(candidate => candidate.name === name.trim());
+        if (!entry) return [];
+        const triggerToken = entry.lora?.trigger.trim().split(/[,，]/)[0]?.trim();
+        return [{ name: entry.name, triggerToken }];
+      });
+      if (noise.length) image.tag = stripCharacterNameTags(image.tag, noise);
+
       // 「必须完整写入」的词串补齐:整串模式与 LoRA 触发词串一个字符都不能少。
       // 实测模型会把不认识的词(adnim)和身体词(large breasts)当噪声删掉;
       // 这里按本图角色名确定性补回,已出现的词不重复加(幂等)。

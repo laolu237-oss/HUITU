@@ -41,9 +41,14 @@ function splitItems(text: string): string[] {
     .filter(Boolean);
 }
 
-/** 词项归一:忽略大小写、下划线/空格差异,避免「long_hair」与「long hair」重复出现。 */
+/** 词项归一:忽略大小写、下划线/空格差异、转义括号的反斜杠,避免同一词重复出现。 */
 function normalizeItem(text: string): string {
-  return text.toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+  return text
+    .toLowerCase()
+    .replace(/_/g, ' ')
+    .replace(/\\(?=[()])/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /**
@@ -84,6 +89,42 @@ export function ensureVerbatimItems(tag: string, sources: readonly VerbatimSourc
     if (index >= 0) front.push(items.splice(index, 1)[0]);
   }
   return [...front, ...items].join(', ');
+}
+
+/** 一个角色名在提示词里可能产生的噪声形态。 */
+export interface CharacterNameNoise {
+  /** 库条目名(如 User、林知意)——它不是 danbooru tag,不该出现在画面提示词里。 */
+  name: string;
+  /** LoRA 触发词串的第一项(真正的触发词,如 adnim)。 */
+  triggerToken?: string;
+}
+
+/**
+ * 剔除提示词里的「角色名噪声」:
+ * - 裸名字(`User`、`林知意`)——模型拿它当 tag,对生图模型无意义;
+ * - `名字 (触发词)`(如 `User (adnim)`)——模型把 LoRA 触发词误当成作品名拼成身份 tag。
+ *   **只在这个括号内容恰好是该角色触发词时删**:真正的身份 tag(如 `firefly (honkai star rail)`)
+ *   括号里是作品名,不会被误删。
+ */
+export function stripCharacterNameTags(
+  tag: string,
+  noise: readonly CharacterNameNoise[],
+): string {
+  if (!noise.length) return tag;
+  const items = splitItems(tag).filter(item => {
+    const key = normalizeItem(item);
+    for (const { name, triggerToken } of noise) {
+      const plain = normalizeItem(name);
+      if (!plain) continue;
+      if (key === plain) return false;
+      const open = key.indexOf('(');
+      if (open < 0 || !key.startsWith(`${plain} (`) && !key.startsWith(`${plain}(`)) continue;
+      const inner = key.slice(open + 1, key.lastIndexOf(')')).trim();
+      if (triggerToken && inner === normalizeItem(triggerToken)) return false;
+    }
+    return true;
+  });
+  return items.join(', ');
 }
 
 /** 库里所有被角色绑定的 LoRA 名——用于把它们从渠道的固定列表里剔除。 */
