@@ -45,6 +45,15 @@ describe('ensureVerbatimItems', () => {
     expect(out.startsWith('adnim')).toBe(true);
   });
 
+  it('dedupes a count tag copied from the trigger string and moves the trigger to the front', () => {
+    const out = ensureVerbatimItems('1girl, adnim, 1girl, long hair, light purple hair', [
+      { text: 'adnim ,1girl, long hair, breasts', prependFirst: true },
+    ]);
+    expect(out.startsWith('adnim, 1girl')).toBe(true);
+    expect(out.match(/1girl/g)?.length).toBe(1);
+    expect(out).toContain('breasts');
+  });
+
   it('is idempotent', () => {
     const once = ensureVerbatimItems('2girls, kitchen', [{ text: TRIGGER, prependFirst: true }]);
     expect(ensureVerbatimItems(once, [{ text: TRIGGER, prependFirst: true }])).toBe(once);

@@ -48,27 +48,42 @@ function normalizeItem(text: string): string {
 
 /**
  * 把「必须完整写入」的词串补齐进提示词。
- * - 已出现的词(忽略大小写/下划线/空白)不重复添加;
+ * - **去重**:同一词(忽略大小写/下划线/空白)只保留第一次出现——模型抄触发词串时
+ *   常把它自带的 1girl 也抄进来,与本图人数 tag 重复;
+ * - 已出现的词不重复添加;
  * - 人数 tag(1girl/2boys/solo…)从来源里剔除:照搬会与本图人数冲突;
- * - prependFirst 的来源(LoRA 触发词)缺失时放到最前面,而不是末尾;
+ * - prependFirst 的来源(LoRA 触发词)统一挪到最前面,按来源顺序排列;
  * - **幂等**:对已补齐的结果再跑一次不会变化。
  */
 export function ensureVerbatimItems(tag: string, sources: readonly VerbatimSource[]): string {
   if (!sources.length) return tag;
-  const items = splitItems(tag);
-  const present = new Set(items.map(normalizeItem));
-  const prepend: string[] = [];
+  const seen = new Set<string>();
+  const items: string[] = [];
+  const push = (item: string) => {
+    const key = normalizeItem(item);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    items.push(item);
+    return true;
+  };
+  for (const item of splitItems(tag)) push(item);
   for (const source of sources) {
-    splitItems(source.text).forEach((item, index) => {
-      if (COUNT_TAG.test(item)) return;
-      const key = normalizeItem(item);
-      if (!key || present.has(key)) return;
-      present.add(key);
-      if (index === 0 && source.prependFirst) prepend.push(item);
-      else items.push(item);
-    });
+    for (const item of splitItems(source.text)) {
+      if (COUNT_TAG.test(item)) continue;
+      push(item);
+    }
   }
-  return [...prepend, ...items].join(', ');
+  // 触发词前置:先摘出来,再按来源顺序整体放到最前
+  const front: string[] = [];
+  for (const source of sources) {
+    if (!source.prependFirst) continue;
+    const first = splitItems(source.text)[0];
+    if (!first) continue;
+    const key = normalizeItem(first);
+    const index = items.findIndex(item => normalizeItem(item) === key);
+    if (index >= 0) front.push(items.splice(index, 1)[0]);
+  }
+  return [...front, ...items].join(', ');
 }
 
 /** 库里所有被角色绑定的 LoRA 名——用于把它们从渠道的固定列表里剔除。 */
