@@ -45,8 +45,9 @@ import {
 import { getContext } from '@/st/context';
 import { fetchComfyModelLists } from '@/backends/comfyObjectInfo';
 import { settings } from '@/state/settings';
+import { listUserImageFolders, listUserImages } from '@/st/images';
 import { phoneAppearanceMissHint, readPhoneAppearance } from '@/st/phoneAppearance';
-import { computed, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 
 /**
  * 角色管理 —— 两层固定外貌库:
@@ -83,6 +84,10 @@ const draftDesc = ref('');
 const regenerating = ref(false);
 // 收藏:列表里置顶显示,纯用户偏好
 const draftFavorite = ref(false);
+// 外貌字段分组:SFW 两列平铺,NSFW 默认折叠(11 个全平铺会把弹窗撑到 1100px)
+const SFW_FIELDS = CHAR_TAG_FIELDS.filter(field => !field.includes('NSFW'));
+const NSFW_FIELDS = CHAR_TAG_FIELDS.filter(field => field.includes('NSFW'));
+const nsfwOpen = ref(false);
 
 /* —— 角色专属 LoRA ——
  * 绑定挂在角色条目上:只有该角色出现在画面里时,出图才挂载这个 LoRA 并把触发词拼进
@@ -194,6 +199,74 @@ const chatEntries = computed(() =>
     entry => charTagBaseNames.has(entry.name) || !globalNameSet.value.has(entry.name),
   ),
 );
+
+/* —— 角色头像 ——
+ * 取图库里该角色目录(`柏宝绘_<角色名>`)的最新一张图;没有图时用名字首字 + 稳定色块兜底。
+ * 只列**实际存在**的目录(服务端对不存在的目录会 mkdir 递归创建),成本 = 有图的角色数。
+ * 图库不可用时静默降级为首字色块,不影响角色管理本身。 */
+const AVATAR_PREFIX = '柏宝绘_';
+const avatarMap = ref<Record<string, string>>({});
+const AVATAR_COLORS: Array<[string, string]> = [
+  ['#fdeaf1', '#c2416d'],
+  ['#f3edff', '#6b4fa8'],
+  ['#eaf4ee', '#3f7a5a'],
+  ['#fdf3e3', '#a06a1f'],
+  ['#e8f1fb', '#2f6fa8'],
+  ['#fbeceb', '#a8443f'],
+];
+
+function avatarOf(name: string): string {
+  return avatarMap.value[name] ?? '';
+}
+
+function initialOf(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return '?';
+  return /^[a-z]/i.test(trimmed) ? trimmed[0].toUpperCase() : trimmed[0];
+}
+
+/** 首字色块:按名字哈希取一组固定配色,同一角色每次刷新颜色一致。 */
+function avatarStyle(name: string): Record<string, string> {
+  let hash = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = (hash * 31 + name.charCodeAt(index)) >>> 0;
+  }
+  const [background, color] = AVATAR_COLORS[hash % AVATAR_COLORS.length];
+  return { background, color };
+}
+
+async function loadAvatars(): Promise<void> {
+  try {
+    const folders = await listUserImageFolders();
+    const wanted = new Set<string>([
+      ...globalCharTagLib.entries.map(entry => entry.name),
+      ...chatEntries.value.map(entry => entry.name),
+    ]);
+    const next: Record<string, string> = {};
+    await Promise.all(
+      folders.map(async folder => {
+        if (!folder.startsWith(AVATAR_PREFIX)) return;
+        const name = folder.slice(AVATAR_PREFIX.length);
+        if (!wanted.has(name)) return;
+        try {
+          // 服务端按日期倒序:第一张就是最新的一张
+          const files = await listUserImages(folder, { sortOrder: 'desc' });
+          if (!files.length) return;
+          next[name] = `/user/images/${encodeURIComponent(folder)}/${encodeURIComponent(files[0])}`;
+        } catch {
+          // 单个目录读取失败不影响其它角色
+        }
+      }),
+    );
+    avatarMap.value = next;
+  } catch {
+    // 图库不可用:全部走首字色块
+  }
+}
+
+onMounted(() => {
+  void loadAvatars();
+});
 
 /* —— 搜索 ——
  * 全局/本聊天库长起来一格一格翻太慢:按角色名 + 任一外貌字段 + 整串 + nl 匹配,
@@ -316,27 +389,6 @@ function toggleClosetGroup(group: ClosetGroup) {
   persistClosetFold();
 }
 
-/** 卡片上的字段 chips:有字段用字段,整串模式回退 raw 文本(模板里分支)。
- *  [v11·2026-10-14] 11 字段在卡片 chip 区挤爆:露前 3 个非空字段,剩余数用 total 统计,
- *  模板里追加 "+N" 徽标。点击卡片进编辑看全 11 字段。 */
-function chipsOf(entry: CharTagEntry): { label: string; value: string }[] {
-  const chips: { label: string; value: string }[] = [];
-  for (const f of CHAR_TAG_FIELDS) {
-    const value = entry.fields[f]?.trim();
-    if (value) chips.push({ label: CHAR_TAG_FIELD_LABELS[f], value });
-  }
-  return chips.slice(0, 3);
-}
-
-/** 卡片 chip 总字段数(用于「+N」徽标)。 */
-function totalChips(entry: CharTagEntry): number {
-  let n = 0;
-  for (const f of CHAR_TAG_FIELDS) {
-    if (entry.fields[f]?.trim()) n++;
-  }
-  return n;
-}
-
 function openEntry(entry: CharTagEntry, scope: Scope) {
   editingName.value = entry.name;
   editingScope.value = scope;
@@ -353,6 +405,7 @@ function openEntry(entry: CharTagEntry, scope: Scope) {
   draftLoraStrength.value = entry.lora?.strength ?? 1;
   draftLoraTrigger.value = entry.lora?.trigger ?? '';
   draftFavorite.value = entry.favorite === true;
+  nsfwOpen.value = false;
   void ensureLoraOptions();
   historyOpen.value = false;
 }
@@ -368,6 +421,7 @@ function addEntry(scope: Scope = 'chat') {
   draftLoraStrength.value = 1;
   draftLoraTrigger.value = '';
   draftFavorite.value = false;
+  nsfwOpen.value = false;
   void ensureLoraOptions();
   historyOpen.value = false;
 }
@@ -934,35 +988,28 @@ function confirmClearAll(): void {
             <p class="bbi-field-hint">
               所有聊天生效,仅手动维护——AI 不会修改全局角色,适合玩家角色等固定形象。本聊天有同名角色时以本聊天为准。
             </p>
-            <ul v-if="filteredGlobalEntries.length" class="bbi-char-grid">
-            <li v-for="entry in filteredGlobalEntries" :key="entry.name" class="bbi-char-card">
-              <button class="bbi-char-card-btn" type="button" @click="openEntry(entry, 'global')">
-                <span class="bbi-char-card-head">
-                  <span class="bbi-char-name">{{ entry.name }}</span>
-                  <span class="bbi-char-pills">
-                    <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
-                    <span class="bbi-char-pill is-global">全局</span>
-                    <span v-if="charTagBaseNames.has(entry.name)" class="bbi-char-pill is-override" title="本聊天有同名角色,当前聊天以本聊天的为准">
-                      本聊天已覆盖
-                    </span>
-                    <span
-                      v-if="entry.lora?.name"
-                      class="bbi-char-pill is-lora"
-                      :title="`出图时动态挂载:${entry.lora.name}(强度 ${entry.lora.strength})`"
-                    >
-                      LoRA
-                    </span>
+            <ul v-if="filteredGlobalEntries.length" class="bbi-char-list">
+            <li v-for="entry in filteredGlobalEntries" :key="entry.name">
+              <button class="bbi-char-row" type="button" @click="openEntry(entry, 'global')">
+                <span class="bbi-char-avatar" :style="avatarStyle(entry.name)">
+                  <img v-if="avatarOf(entry.name)" :src="avatarOf(entry.name)" alt="" loading="lazy" />
+                  <template v-else>{{ initialOf(entry.name) }}</template>
+                </span>
+                <span class="bbi-char-row-name">{{ entry.name }}</span>
+                <span class="bbi-char-pills">
+                  <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
+                  <span class="bbi-char-pill is-global">全局</span>
+                  <span v-if="charTagBaseNames.has(entry.name)" class="bbi-char-pill is-override" title="本聊天有同名角色,当前聊天以本聊天的为准">
+                    本聊天已覆盖
+                  </span>
+                  <span
+                    v-if="entry.lora?.name"
+                    class="bbi-char-pill is-lora"
+                    :title="`出图时动态挂载:${entry.lora.name}(强度 ${entry.lora.strength})`"
+                  >
+                    LoRA
                   </span>
                 </span>
-                <span v-if="chipsOf(entry).length" class="bbi-char-chips">
-                  <span v-for="chip in chipsOf(entry)" :key="chip.label" class="bbi-chip" :title="chip.label">
-                    {{ chip.value }}
-                  </span>
-                </span>
-                  <span v-if="totalChips(entry) > chipsOf(entry).length" class="bbi-chip is-more" :title="`还有 ${totalChips(entry) - chipsOf(entry).length} 个字段,点卡片看全部`">
-                    +{{ totalChips(entry) - chipsOf(entry).length }}
-                  </span>
-                <span v-else class="bbi-char-raw">{{ entry.raw }}</span>
               </button>
             </li>
             </ul>
@@ -1025,47 +1072,40 @@ function confirmClearAll(): void {
             <p class="bbi-field-hint">
               仅当前聊天生效:柏宝书角色自动建档,AI 随剧情报告永久变化;可查看历史并回滚。
             </p>
-            <ul v-if="filteredChatEntries.length" class="bbi-char-grid">
-            <li v-for="entry in filteredChatEntries" :key="entry.name" class="bbi-char-card">
-              <button class="bbi-char-card-btn" type="button" @click="openEntry(entry, 'chat')">
-                <span class="bbi-char-card-head">
-                  <span class="bbi-char-name">{{ entry.name }}</span>
-                  <span class="bbi-char-pills">
-                    <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
-                    <span
-                      class="bbi-char-pill"
-                      :class="{ 'is-book': entry.source === 'book', 'is-ai': entry.source === 'ai' }"
-                    >
-                      {{ sourceLabel(entry) }}
-                    </span>
-                    <span v-if="globalNameSet.has(entry.name)" class="bbi-char-pill is-override" title="与全局库同名,当前聊天以本条为准">
-                      覆盖全局
-                    </span>
-                    <span
-                      v-if="entry.lora?.name"
-                      class="bbi-char-pill is-lora"
-                      :title="`出图时动态挂载:${entry.lora.name}(强度 ${entry.lora.strength})`"
-                    >
-                      LoRA
-                    </span>
-                    <span
-                      v-if="entry.history.length"
-                      class="bbi-char-history-badge"
-                      :title="`${entry.history.length} 条变更记录,点卡片查看`"
-                    >
-                      <Icon name="history" />{{ entry.history.length }}
-                    </span>
+            <ul v-if="filteredChatEntries.length" class="bbi-char-list">
+            <li v-for="entry in filteredChatEntries" :key="entry.name">
+              <button class="bbi-char-row" type="button" @click="openEntry(entry, 'chat')">
+                <span class="bbi-char-avatar" :style="avatarStyle(entry.name)">
+                  <img v-if="avatarOf(entry.name)" :src="avatarOf(entry.name)" alt="" loading="lazy" />
+                  <template v-else>{{ initialOf(entry.name) }}</template>
+                </span>
+                <span class="bbi-char-row-name">{{ entry.name }}</span>
+                <span class="bbi-char-pills">
+                  <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
+                  <span
+                    class="bbi-char-pill"
+                    :class="{ 'is-book': entry.source === 'book', 'is-ai': entry.source === 'ai' }"
+                  >
+                    {{ sourceLabel(entry) }}
+                  </span>
+                  <span v-if="globalNameSet.has(entry.name)" class="bbi-char-pill is-override" title="与全局库同名,当前聊天以本条为准">
+                    覆盖全局
+                  </span>
+                  <span
+                    v-if="entry.lora?.name"
+                    class="bbi-char-pill is-lora"
+                    :title="`出图时动态挂载:${entry.lora.name}(强度 ${entry.lora.strength})`"
+                  >
+                    LoRA
+                  </span>
+                  <span
+                    v-if="entry.history.length"
+                    class="bbi-char-history-badge"
+                    :title="`${entry.history.length} 条变更记录,点卡片查看`"
+                  >
+                    <Icon name="history" />{{ entry.history.length }}
                   </span>
                 </span>
-                <span v-if="chipsOf(entry).length" class="bbi-char-chips">
-                  <span v-for="chip in chipsOf(entry)" :key="chip.label" class="bbi-chip" :title="chip.label">
-                    {{ chip.value }}
-                  </span>
-                </span>
-                  <span v-if="totalChips(entry) > chipsOf(entry).length" class="bbi-chip is-more" :title="`还有 ${totalChips(entry) - chipsOf(entry).length} 个字段,点卡片看全部`">
-                    +{{ totalChips(entry) - chipsOf(entry).length }}
-                  </span>
-                <span v-else class="bbi-char-raw">{{ entry.raw }}</span>
               </button>
             </li>
             </ul>
@@ -1380,13 +1420,36 @@ function confirmClearAll(): void {
             外貌字段
             <span v-if="draftLoraMode" class="bbi-char-pill is-lora" title="已绑定 LoRA:外貌字段不会发送给 AI">不发送</span>
           </span>
-          <div class="bbi-char-form bbi-char-form--list">
-            <label v-for="f in CHAR_TAG_FIELDS" :key="f" class="bbi-char-form-row bbi-char-form-row--full">
+          <div class="bbi-char-form bbi-char-form--grid">
+            <label v-for="f in SFW_FIELDS" :key="f" class="bbi-char-form-cell">
               <span class="bbi-char-form-label">{{ CHAR_TAG_FIELD_LABELS[f] }}</span>
               <BbiTextarea
                 v-model="draft.fields[f]"
-                :rows="1"
-                :max-rows="4"
+                :rows="2"
+                :max-rows="6"
+                mono
+                :placeholder="FIELD_PLACEHOLDERS[f]"
+                @input="markManual"
+              />
+            </label>
+          </div>
+          <button
+            class="bbi-char-nsfw-toggle"
+            type="button"
+            :aria-expanded="nsfwOpen"
+            @click="nsfwOpen = !nsfwOpen"
+          >
+            <span class="bbi-char-history-caret" :class="{ 'is-open': nsfwOpen }"><Icon name="chevron" /></span>
+            NSFW 字段 {{ NSFW_FIELDS.length }} 项
+            <span class="bbi-char-nsfw-hint">{{ nsfwOpen ? '收起' : '展开' }}</span>
+          </button>
+          <div v-if="nsfwOpen" class="bbi-char-form bbi-char-form--grid">
+            <label v-for="f in NSFW_FIELDS" :key="f" class="bbi-char-form-cell">
+              <span class="bbi-char-form-label">{{ CHAR_TAG_FIELD_LABELS[f] }}</span>
+              <BbiTextarea
+                v-model="draft.fields[f]"
+                :rows="2"
+                :max-rows="6"
                 mono
                 :placeholder="FIELD_PLACEHOLDERS[f]"
                 @input="markManual"
@@ -1893,6 +1956,106 @@ function confirmClearAll(): void {
   vertical-align: middle;
 }
 
+/* —— 角色列表:单列长条(方形头像 + 名字 + 右侧徽标),点整行进编辑 —— */
+.bbi-char-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.bbi-char-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 12px 7px 8px;
+  border: 1px solid var(--bbi-line);
+  border-radius: var(--bbi-radius);
+  background: var(--bbi-surface);
+  color: var(--bbi-ink);
+  font-family: var(--bbi-font-sans);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color var(--bbi-dur) var(--bbi-ease),
+    background var(--bbi-dur) var(--bbi-ease);
+}
+.bbi-char-row:hover {
+  border-color: var(--bbi-accent);
+  background: var(--bbi-accent-soft);
+}
+/* 头像:图库最新一张图;没有图时显示名字首字 + 稳定色块 */
+.bbi-char-avatar {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 500;
+  user-select: none;
+}
+.bbi-char-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.bbi-char-row-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* —— 外貌字段:桌面两列,窄屏单列;NSFW 默认折叠 —— */
+.bbi-char-form--grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.bbi-char-form-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.bbi-char-nsfw-toggle {
+  margin-top: 10px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px dashed var(--bbi-line);
+  border-radius: var(--bbi-radius);
+  background: transparent;
+  color: var(--bbi-ink-muted);
+  font-family: var(--bbi-font-sans);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.bbi-char-nsfw-toggle:hover {
+  color: var(--bbi-ink);
+  border-color: var(--bbi-accent);
+}
+.bbi-char-nsfw-hint {
+  margin-left: auto;
+  color: var(--bbi-accent);
+}
+@media (max-width: 640px) {
+  .bbi-char-form--grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* —— 角色卡片网格 —— */
 .bbi-char-grid {
   list-style: none;
@@ -2039,7 +2202,7 @@ function confirmClearAll(): void {
 
 /* —— 弹窗加宽,容纳两列字段表单 —— */
 .bbi-char-modal {
-  max-width: 600px;
+  max-width: 680px;
 }
 
 /* —— 字段表单:两列网格(默认 8 字段)、列表(11 字段) —— */
