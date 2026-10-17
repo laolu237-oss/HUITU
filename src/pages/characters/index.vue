@@ -7,6 +7,8 @@ import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { generateCharTags } from '@/autoTag/charAnchors';
 import { readBookMemory } from '@/autoTag/bookMemory';
+import { generateImage, decideSeed } from '@/generate';
+import { saveExternalImage } from '@/floor/storage';
 import {
   CHAR_TAG_FIELDS,
   CHAR_TAG_FIELD_LABELS,
@@ -200,12 +202,13 @@ const chatEntries = computed(() =>
   ),
 );
 
-/* —— 角色头像 ——
- * 取图库里该角色目录(`柏宝绘_<角色名>`)的最新一张图;没有图时用名字首字 + 稳定色块兜底。
- * 只列**实际存在**的目录(服务端对不存在的目录会 mkdir 递归创建),成本 = 有图的角色数。
- * 图库不可用时静默降级为首字色块,不影响角色管理本身。 */
+/* —— 角色行的图片格 ——
+ * 一行 = 角色名 + 一排图片格(最多 4 张,第 4 张装不下时收成 "+N")。
+ * 图片取图库里该角色目录(`柏宝绘_<角色名>`)的最新几张;没有图的角色不占格子,
+ * 行退回「名字 + 徽标」的紧凑形态。只列**实际存在**的目录(服务端对不存在的目录
+ * 会 mkdir 递归创建),成本 = 有图的角色数。 */
 const AVATAR_PREFIX = '柏宝绘_';
-const avatarMap = ref<Record<string, string>>({});
+const ROW_SLOTS = 4;
 const AVATAR_COLORS: Array<[string, string]> = [
   ['#fdeaf1', '#c2416d'],
   ['#f3edff', '#6b4fa8'],
@@ -214,15 +217,18 @@ const AVATAR_COLORS: Array<[string, string]> = [
   ['#e8f1fb', '#2f6fa8'],
   ['#fbeceb', '#a8443f'],
 ];
+const imageMap = ref<Record<string, string[]>>({});
 
-function avatarOf(name: string): string {
-  return avatarMap.value[name] ?? '';
-}
-
-function initialOf(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) return '?';
-  return /^[a-z]/i.test(trimmed) ? trimmed[0].toUpperCase() : trimmed[0];
+function imageCells(name: string): Array<{ src: string } | { more: number }> {
+  const list = imageMap.value[name] ?? [];
+  if (!list.length) return [];
+  const cells: Array<{ src: string } | { more: number }> = list
+    .slice(0, ROW_SLOTS)
+    .map(src => ({ src }));
+  if (list.length > ROW_SLOTS) {
+    cells[ROW_SLOTS - 1] = { more: list.length - ROW_SLOTS + 1 };
+  }
+  return cells;
 }
 
 /** 首字色块:按名字哈希取一组固定配色,同一角色每次刷新颜色一致。 */
@@ -235,38 +241,78 @@ function avatarStyle(name: string): Record<string, string> {
   return { background, color };
 }
 
-async function loadAvatars(): Promise<void> {
+function initialOf(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return '?';
+  return /^[a-z]/i.test(trimmed) ? trimmed[0].toUpperCase() : trimmed[0];
+}
+
+async function loadRowImages(): Promise<void> {
   try {
     const folders = await listUserImageFolders();
     const wanted = new Set<string>([
       ...globalCharTagLib.entries.map(entry => entry.name),
       ...chatEntries.value.map(entry => entry.name),
     ]);
-    const next: Record<string, string> = {};
+    const next: Record<string, string[]> = {};
     await Promise.all(
       folders.map(async folder => {
         if (!folder.startsWith(AVATAR_PREFIX)) return;
         const name = folder.slice(AVATAR_PREFIX.length);
         if (!wanted.has(name)) return;
         try {
-          // 服务端按日期倒序:第一张就是最新的一张
+          // 服务端按日期倒序:前面就是最新的几张
           const files = await listUserImages(folder, { sortOrder: 'desc' });
           if (!files.length) return;
-          next[name] = `/user/images/${encodeURIComponent(folder)}/${encodeURIComponent(files[0])}`;
+          next[name] = files
+            .slice(0, ROW_SLOTS)
+            .map(file => `/user/images/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`);
         } catch {
           // 单个目录读取失败不影响其它角色
         }
       }),
     );
-    avatarMap.value = next;
+    imageMap.value = next;
   } catch {
-    // 图库不可用:全部走首字色块
+    // 图库不可用:所有行都退回「名字 + 徽标」的紧凑形态
   }
 }
 
 onMounted(() => {
-  void loadAvatars();
+  void loadRowImages();
 });
+
+/* —— 行内「生成」按钮 ——
+ * 直接用当前出图渠道(ComfyUI / NAI 都走 generateImage 这一条路)按该角色的外貌串出一张图,
+ * 存进图库该角色的目录,随后图片格里就能看到它。LoRA 绑定的角色走 characterNames,
+ * 由 generate.ts 负责挂 LoRA 与拼触发词串。 */
+const genBusy = ref<Record<string, boolean>>({});
+
+async function generateFor(entry: CharTagEntry): Promise<void> {
+  const tag = buildEntryTag(entry);
+  if (!tag) {
+    toastr.warning('这个角色还没有可用的外貌(LoRA 触发词 / 整串 / 字段至少填一个)', '柏宝绘');
+    return;
+  }
+  if (genBusy.value[entry.name]) return;
+  genBusy.value = { ...genBusy.value, [entry.name]: true };
+  try {
+    const { result, seed, meta } = await generateImage(
+      { prompt: tag, size: 'portrait', characterNames: [entry.name], seed: decideSeed(settings.defaultBackend) },
+      undefined,
+    );
+    // saveExternalImage:只存文件 + 侧写,不往任何楼层写指针(与公开接口同一条路径)
+    await saveExternalImage(entry.name, tag, seed, result, meta);
+    toastr.success('已生成并存进图库', '柏宝绘');
+    // 新图进目录,顺手刷新图片格
+    await loadRowImages();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    toastr.error(`生成失败:${message}`, '柏宝绘');
+  } finally {
+    genBusy.value = { ...genBusy.value, [entry.name]: false };
+  }
+}
 
 /* —— 搜索 ——
  * 全局/本聊天库长起来一格一格翻太慢:按角色名 + 任一外貌字段 + 整串 + nl 匹配,
@@ -990,12 +1036,24 @@ function confirmClearAll(): void {
             </p>
             <ul v-if="filteredGlobalEntries.length" class="bbi-char-list">
             <li v-for="entry in filteredGlobalEntries" :key="entry.name">
-              <button class="bbi-char-row" type="button" @click="openEntry(entry, 'global')">
-                <span class="bbi-char-avatar" :style="avatarStyle(entry.name)">
-                  <img v-if="avatarOf(entry.name)" :src="avatarOf(entry.name)" alt="" loading="lazy" />
-                  <template v-else>{{ initialOf(entry.name) }}</template>
+              <div
+                class="bbi-char-row"
+                role="button"
+                tabindex="0"
+                @click="openEntry(entry, 'global')"
+                @keydown.enter.prevent="openEntry(entry, 'global')"
+                @keydown.space.prevent="openEntry(entry, 'global')"
+              >
+                <span class="bbi-char-row-id">
+                  <span class="bbi-char-avatar" :style="avatarStyle(entry.name)">{{ initialOf(entry.name) }}</span>
+                  <span class="bbi-char-row-name">{{ entry.name }}</span>
                 </span>
-                <span class="bbi-char-row-name">{{ entry.name }}</span>
+                <span v-if="imageCells(entry.name).length" class="bbi-char-row-imgs">
+                  <span v-for="(cell, index) in imageCells(entry.name)" :key="index" class="bbi-char-img" :class="{ 'is-more': 'more' in cell }">
+                    <img v-if="'src' in cell" :src="cell.src" alt="" loading="lazy" />
+                    <span v-else>+{{ cell.more }}</span>
+                  </span>
+                </span>
                 <span class="bbi-char-pills">
                   <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
                   <span class="bbi-char-pill is-global">全局</span>
@@ -1010,7 +1068,16 @@ function confirmClearAll(): void {
                     LoRA
                   </span>
                 </span>
-              </button>
+                <button
+                  class="bbi-char-gen"
+                  type="button"
+                  :disabled="genBusy[entry.name]"
+                  :title="genBusy[entry.name] ? '生成中…' : '按这个角色的外貌生成一张图(存进图库)'"
+                  @click.stop="generateFor(entry)"
+                >
+                  <Icon name="generate" /> {{ genBusy[entry.name] ? '生成中' : '生成' }}
+                </button>
+              </div>
             </li>
             </ul>
             <p v-else-if="globalCharTagLib.entries.length && globalSearch" class="bbi-char-empty">
@@ -1074,12 +1141,24 @@ function confirmClearAll(): void {
             </p>
             <ul v-if="filteredChatEntries.length" class="bbi-char-list">
             <li v-for="entry in filteredChatEntries" :key="entry.name">
-              <button class="bbi-char-row" type="button" @click="openEntry(entry, 'chat')">
-                <span class="bbi-char-avatar" :style="avatarStyle(entry.name)">
-                  <img v-if="avatarOf(entry.name)" :src="avatarOf(entry.name)" alt="" loading="lazy" />
-                  <template v-else>{{ initialOf(entry.name) }}</template>
+              <div
+                class="bbi-char-row"
+                role="button"
+                tabindex="0"
+                @click="openEntry(entry, 'chat')"
+                @keydown.enter.prevent="openEntry(entry, 'chat')"
+                @keydown.space.prevent="openEntry(entry, 'chat')"
+              >
+                <span class="bbi-char-row-id">
+                  <span class="bbi-char-avatar" :style="avatarStyle(entry.name)">{{ initialOf(entry.name) }}</span>
+                  <span class="bbi-char-row-name">{{ entry.name }}</span>
                 </span>
-                <span class="bbi-char-row-name">{{ entry.name }}</span>
+                <span v-if="imageCells(entry.name).length" class="bbi-char-row-imgs">
+                  <span v-for="(cell, index) in imageCells(entry.name)" :key="index" class="bbi-char-img" :class="{ 'is-more': 'more' in cell }">
+                    <img v-if="'src' in cell" :src="cell.src" alt="" loading="lazy" />
+                    <span v-else>+{{ cell.more }}</span>
+                  </span>
+                </span>
                 <span class="bbi-char-pills">
                   <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
                   <span
@@ -1106,7 +1185,16 @@ function confirmClearAll(): void {
                     <Icon name="history" />{{ entry.history.length }}
                   </span>
                 </span>
-              </button>
+                <button
+                  class="bbi-char-gen"
+                  type="button"
+                  :disabled="genBusy[entry.name]"
+                  :title="genBusy[entry.name] ? '生成中…' : '按这个角色的外貌生成一张图(存进图库)'"
+                  @click.stop="generateFor(entry)"
+                >
+                  <Icon name="generate" /> {{ genBusy[entry.name] ? '生成中' : '生成' }}
+                </button>
+              </div>
             </li>
             </ul>
             <p v-else-if="chatEntries.length && chatSearch" class="bbi-char-empty">
@@ -1964,12 +2052,14 @@ function confirmClearAll(): void {
   display: grid;
   gap: 6px;
 }
+/* 一行的四列:名字 | 图片格(有图才占) | 徽标 | 生成按钮 */
 .bbi-char-row {
   width: 100%;
-  display: flex;
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
-  padding: 7px 12px 7px 8px;
+  padding: 7px 10px 7px 8px;
   border: 1px solid var(--bbi-line);
   border-radius: var(--bbi-radius);
   background: var(--bbi-surface);
@@ -1985,7 +2075,72 @@ function confirmClearAll(): void {
   border-color: var(--bbi-accent);
   background: var(--bbi-accent-soft);
 }
-/* 头像:图库最新一张图;没有图时显示名字首字 + 稳定色块 */
+.bbi-char-row:focus-visible {
+  outline: 2px solid var(--bbi-accent);
+  outline-offset: 1px;
+}
+/* 图片格:最多 4 张,第四张装不下时收成 +N */
+.bbi-char-row-imgs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+.bbi-char-img {
+  aspect-ratio: 1 / 1;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--bbi-line);
+  background: var(--bbi-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--bbi-ink-muted);
+}
+.bbi-char-img.is-more {
+  border-style: dashed;
+  border-color: var(--bbi-accent);
+  color: var(--bbi-accent);
+  font-weight: 500;
+}
+.bbi-char-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* 行内生成按钮:小、靠右,点了直接用当前渠道出一张图存进图库 */
+.bbi-char-gen {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--bbi-line);
+  border-radius: 999px;
+  background: var(--bbi-surface);
+  color: var(--bbi-ink-muted);
+  font-family: var(--bbi-font-sans);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.bbi-char-gen:hover {
+  color: var(--bbi-accent);
+  border-color: var(--bbi-accent);
+}
+.bbi-char-gen:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+/* 头像:名字首字 + 稳定色块(图片由右侧图片格负责) */
+.bbi-char-row-id {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 .bbi-char-avatar {
   flex: none;
   width: 40px;
