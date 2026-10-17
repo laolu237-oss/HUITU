@@ -8,7 +8,8 @@ import ModalMask from '@/components/ModalMask.vue';
 import { generateCharTags } from '@/autoTag/charAnchors';
 import { readBookMemory } from '@/autoTag/bookMemory';
 import { generateImage, decideSeed } from '@/generate';
-import { saveExternalImage } from '@/floor/storage';
+import { prepareImageForStorage } from '@/floor/storage';
+import { AVATAR_FILE_STEM, buildAvatarPrompt, isAvatarFile } from '@/characterAvatar';
 import {
   CHAR_TAG_FIELDS,
   CHAR_TAG_FIELD_LABELS,
@@ -47,7 +48,7 @@ import {
 import { getContext } from '@/st/context';
 import { fetchComfyModelLists } from '@/backends/comfyObjectInfo';
 import { settings } from '@/state/settings';
-import { listUserImageFolders, listUserImages } from '@/st/images';
+import { listUserImageFolders, listUserImages, uploadUserImage } from '@/st/images';
 import { phoneAppearanceMissHint, readPhoneAppearance } from '@/st/phoneAppearance';
 import { computed, onMounted, reactive, ref } from 'vue';
 
@@ -202,13 +203,11 @@ const chatEntries = computed(() =>
   ),
 );
 
-/* —— 角色行的图片格 ——
- * 一行 = 角色名 + 一排图片格(最多 4 张,第 4 张装不下时收成 "+N")。
- * 图片取图库里该角色目录(`柏宝绘_<角色名>`)的最新几张;没有图的角色不占格子,
- * 行退回「名字 + 徽标」的紧凑形态。只列**实际存在**的目录(服务端对不存在的目录
- * 会 mkdir 递归创建),成本 = 有图的角色数。 */
+/* —— 角色头像 ——
+ * 一个角色一个正方形格子:有头像显示头像(`柏宝绘_<角色名>/avatar.*`),
+ * 没有头像但目录里有出图的显示最新一张,都没有则显示首字色块。
+ * 只列**实际存在**的目录(服务端对不存在的目录会 mkdir 递归创建),成本 = 有图的角色数。 */
 const AVATAR_PREFIX = '柏宝绘_';
-const ROW_SLOTS = 4;
 const AVATAR_COLORS: Array<[string, string]> = [
   ['#fdeaf1', '#c2416d'],
   ['#f3edff', '#6b4fa8'],
@@ -217,18 +216,18 @@ const AVATAR_COLORS: Array<[string, string]> = [
   ['#e8f1fb', '#2f6fa8'],
   ['#fbeceb', '#a8443f'],
 ];
-const imageMap = ref<Record<string, string[]>>({});
+interface CharacterImages {
+  /** 头像文件(src);没有则空。 */
+  avatar?: string;
+  /** 目录里最新的一张出图(src);没有则空。 */
+  latest?: string;
+}
+const imageMap = ref<Record<string, CharacterImages>>({});
 
-function imageCells(name: string): Array<{ src: string } | { more: number }> {
-  const list = imageMap.value[name] ?? [];
-  if (!list.length) return [];
-  const cells: Array<{ src: string } | { more: number }> = list
-    .slice(0, ROW_SLOTS)
-    .map(src => ({ src }));
-  if (list.length > ROW_SLOTS) {
-    cells[ROW_SLOTS - 1] = { more: list.length - ROW_SLOTS + 1 };
-  }
-  return cells;
+/** 格子里显示的图:头像优先,退回最新出图,再退回空(首字色块)。 */
+function tileSrc(name: string): string {
+  const images = imageMap.value[name];
+  return images?.avatar ?? images?.latest ?? '';
 }
 
 /** 首字色块:按名字哈希取一组固定配色,同一角色每次刷新颜色一致。 */
@@ -247,26 +246,33 @@ function initialOf(name: string): string {
   return /^[a-z]/i.test(trimmed) ? trimmed[0].toUpperCase() : trimmed[0];
 }
 
-async function loadRowImages(): Promise<void> {
+function imageSrc(folder: string, file: string): string {
+  return `/user/images/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`;
+}
+
+async function loadAvatars(): Promise<void> {
   try {
     const folders = await listUserImageFolders();
     const wanted = new Set<string>([
       ...globalCharTagLib.entries.map(entry => entry.name),
       ...chatEntries.value.map(entry => entry.name),
     ]);
-    const next: Record<string, string[]> = {};
+    const next: Record<string, CharacterImages> = {};
     await Promise.all(
       folders.map(async folder => {
         if (!folder.startsWith(AVATAR_PREFIX)) return;
         const name = folder.slice(AVATAR_PREFIX.length);
         if (!wanted.has(name)) return;
         try {
-          // 服务端按日期倒序:前面就是最新的几张
+          // 服务端按日期倒序:第一张就是最新的
           const files = await listUserImages(folder, { sortOrder: 'desc' });
           if (!files.length) return;
-          next[name] = files
-            .slice(0, ROW_SLOTS)
-            .map(file => `/user/images/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`);
+          const avatar = files.find(isAvatarFile);
+          const latest = files.find(file => !isAvatarFile(file));
+          next[name] = {
+            ...(avatar ? { avatar: imageSrc(folder, avatar) } : {}),
+            ...(latest ? { latest: imageSrc(folder, latest) } : {}),
+          };
         } catch {
           // 单个目录读取失败不影响其它角色
         }
@@ -274,18 +280,19 @@ async function loadRowImages(): Promise<void> {
     );
     imageMap.value = next;
   } catch {
-    // 图库不可用:所有行都退回「名字 + 徽标」的紧凑形态
+    // 图库不可用:所有格子退回首字色块
   }
 }
 
 onMounted(() => {
-  void loadRowImages();
+  void loadAvatars();
 });
 
-/* —— 行内「生成」按钮 ——
- * 直接用当前出图渠道(ComfyUI / NAI 都走 generateImage 这一条路)按该角色的外貌串出一张图,
- * 存进图库该角色的目录,随后图片格里就能看到它。LoRA 绑定的角色走 characterNames,
- * 由 generate.ts 负责挂 LoRA 与拼触发词串。 */
+/* —— 格子里的「生成」按钮 ——
+ * 用当前出图渠道(ComfyUI / NAI 都走 generateImage 这一条路)按该角色的外貌串出一张**头像**:
+ * 提示词 = 角色外貌串 + 内置头像提示词(characterAvatar.ts),LoRA 绑定的角色走 characterNames,
+ * 由 generate.ts 负责挂 LoRA 与拼触发词串。存成该角色目录下固定文件名 avatar.*(同名覆盖),
+ * 所以「重新生成」就是换头像,不会在目录里越攒越多。 */
 const genBusy = ref<Record<string, boolean>>({});
 
 async function generateFor(entry: CharTagEntry): Promise<void> {
@@ -297,15 +304,20 @@ async function generateFor(entry: CharTagEntry): Promise<void> {
   if (genBusy.value[entry.name]) return;
   genBusy.value = { ...genBusy.value, [entry.name]: true };
   try {
-    const { result, seed, meta } = await generateImage(
-      { prompt: tag, size: 'portrait', characterNames: [entry.name], seed: decideSeed(settings.defaultBackend) },
+    const { result, seed } = await generateImage(
+      {
+        prompt: buildAvatarPrompt(tag),
+        size: 'portrait',
+        characterNames: [entry.name],
+        seed: decideSeed(settings.defaultBackend),
+      },
       undefined,
     );
-    // saveExternalImage:只存文件 + 侧写,不往任何楼层写指针(与公开接口同一条路径)
-    await saveExternalImage(entry.name, tag, seed, result, meta);
-    toastr.success('已生成并存进图库', '柏宝绘');
-    // 新图进目录,顺手刷新图片格
-    await loadRowImages();
+    // 头像固定文件名(同名覆盖),不走 saveExternalImage:那张是给楼层/公开接口用的唯一名 + 侧写
+    const { base64, format } = await prepareImageForStorage(result);
+    await uploadUserImage(`${AVATAR_PREFIX}${entry.name}`, AVATAR_FILE_STEM, base64, format);
+    toastr.success('头像已生成', '柏宝绘');
+    await loadAvatars();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     toastr.error(`生成失败:${message}`, '柏宝绘');
@@ -1034,50 +1046,34 @@ function confirmClearAll(): void {
             <p class="bbi-field-hint">
               所有聊天生效,仅手动维护——AI 不会修改全局角色,适合玩家角色等固定形象。本聊天有同名角色时以本聊天为准。
             </p>
-            <ul v-if="filteredGlobalEntries.length" class="bbi-char-list">
-            <li v-for="entry in filteredGlobalEntries" :key="entry.name">
+            <ul v-if="filteredGlobalEntries.length" class="bbi-char-tiles">
+            <li v-for="entry in filteredGlobalEntries" :key="entry.name" class="bbi-char-tile">
               <div
-                class="bbi-char-row"
+                class="bbi-char-tile-box"
                 role="button"
                 tabindex="0"
                 @click="openEntry(entry, 'global')"
                 @keydown.enter.prevent="openEntry(entry, 'global')"
                 @keydown.space.prevent="openEntry(entry, 'global')"
               >
-                <span class="bbi-char-row-id">
-                  <span class="bbi-char-avatar" :style="avatarStyle(entry.name)">{{ initialOf(entry.name) }}</span>
-                  <span class="bbi-char-row-name">{{ entry.name }}</span>
-                </span>
-                <span v-if="imageCells(entry.name).length" class="bbi-char-row-imgs">
-                  <span v-for="(cell, index) in imageCells(entry.name)" :key="index" class="bbi-char-img" :class="{ 'is-more': 'more' in cell }">
-                    <img v-if="'src' in cell" :src="cell.src" alt="" loading="lazy" />
-                    <span v-else>+{{ cell.more }}</span>
-                  </span>
-                </span>
-                <span class="bbi-char-pills">
-                  <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
-                  <span class="bbi-char-pill is-global">全局</span>
-                  <span v-if="charTagBaseNames.has(entry.name)" class="bbi-char-pill is-override" title="本聊天有同名角色,当前聊天以本聊天的为准">
-                    本聊天已覆盖
-                  </span>
-                  <span
-                    v-if="entry.lora?.name"
-                    class="bbi-char-pill is-lora"
-                    :title="`出图时动态挂载:${entry.lora.name}(强度 ${entry.lora.strength})`"
-                  >
-                    LoRA
-                  </span>
-                </span>
+                <img v-if="tileSrc(entry.name)" :src="tileSrc(entry.name)" alt="" loading="lazy" />
+                <span v-else class="bbi-char-tile-empty" :style="avatarStyle(entry.name)">{{ initialOf(entry.name) }}</span>
                 <button
-                  class="bbi-char-gen"
+                  class="bbi-char-tile-gen"
                   type="button"
                   :disabled="genBusy[entry.name]"
-                  :title="genBusy[entry.name] ? '生成中…' : '按这个角色的外貌生成一张图(存进图库)'"
+                  :title="genBusy[entry.name] ? '生成中…' : '生成头像(角色外貌串 + 内置头像提示词)'"
                   @click.stop="generateFor(entry)"
                 >
                   <Icon name="generate" /> {{ genBusy[entry.name] ? '生成中' : '生成' }}
                 </button>
               </div>
+              <span class="bbi-char-tile-name">{{ entry.name }}</span>
+              <span class="bbi-char-tile-badges">
+                <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
+                <span class="bbi-char-pill is-global">全局</span>
+                <span v-if="entry.lora?.name" class="bbi-char-pill is-lora" :title="`LoRA: ${entry.lora.name}`">L</span>
+              </span>
             </li>
             </ul>
             <p v-else-if="globalCharTagLib.entries.length && globalSearch" class="bbi-char-empty">
@@ -1139,62 +1135,40 @@ function confirmClearAll(): void {
             <p class="bbi-field-hint">
               仅当前聊天生效:柏宝书角色自动建档,AI 随剧情报告永久变化;可查看历史并回滚。
             </p>
-            <ul v-if="filteredChatEntries.length" class="bbi-char-list">
-            <li v-for="entry in filteredChatEntries" :key="entry.name">
+            <ul v-if="filteredChatEntries.length" class="bbi-char-tiles">
+            <li v-for="entry in filteredChatEntries" :key="entry.name" class="bbi-char-tile">
               <div
-                class="bbi-char-row"
+                class="bbi-char-tile-box"
                 role="button"
                 tabindex="0"
                 @click="openEntry(entry, 'chat')"
                 @keydown.enter.prevent="openEntry(entry, 'chat')"
                 @keydown.space.prevent="openEntry(entry, 'chat')"
               >
-                <span class="bbi-char-row-id">
-                  <span class="bbi-char-avatar" :style="avatarStyle(entry.name)">{{ initialOf(entry.name) }}</span>
-                  <span class="bbi-char-row-name">{{ entry.name }}</span>
-                </span>
-                <span v-if="imageCells(entry.name).length" class="bbi-char-row-imgs">
-                  <span v-for="(cell, index) in imageCells(entry.name)" :key="index" class="bbi-char-img" :class="{ 'is-more': 'more' in cell }">
-                    <img v-if="'src' in cell" :src="cell.src" alt="" loading="lazy" />
-                    <span v-else>+{{ cell.more }}</span>
-                  </span>
-                </span>
-                <span class="bbi-char-pills">
-                  <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
-                  <span
-                    class="bbi-char-pill"
-                    :class="{ 'is-book': entry.source === 'book', 'is-ai': entry.source === 'ai' }"
-                  >
-                    {{ sourceLabel(entry) }}
-                  </span>
-                  <span v-if="globalNameSet.has(entry.name)" class="bbi-char-pill is-override" title="与全局库同名,当前聊天以本条为准">
-                    覆盖全局
-                  </span>
-                  <span
-                    v-if="entry.lora?.name"
-                    class="bbi-char-pill is-lora"
-                    :title="`出图时动态挂载:${entry.lora.name}(强度 ${entry.lora.strength})`"
-                  >
-                    LoRA
-                  </span>
-                  <span
-                    v-if="entry.history.length"
-                    class="bbi-char-history-badge"
-                    :title="`${entry.history.length} 条变更记录,点卡片查看`"
-                  >
-                    <Icon name="history" />{{ entry.history.length }}
-                  </span>
-                </span>
+                <img v-if="tileSrc(entry.name)" :src="tileSrc(entry.name)" alt="" loading="lazy" />
+                <span v-else class="bbi-char-tile-empty" :style="avatarStyle(entry.name)">{{ initialOf(entry.name) }}</span>
                 <button
-                  class="bbi-char-gen"
+                  class="bbi-char-tile-gen"
                   type="button"
                   :disabled="genBusy[entry.name]"
-                  :title="genBusy[entry.name] ? '生成中…' : '按这个角色的外貌生成一张图(存进图库)'"
+                  :title="genBusy[entry.name] ? '生成中…' : '生成头像(角色外貌串 + 内置头像提示词)'"
                   @click.stop="generateFor(entry)"
                 >
                   <Icon name="generate" /> {{ genBusy[entry.name] ? '生成中' : '生成' }}
                 </button>
               </div>
+              <span class="bbi-char-tile-name">{{ entry.name }}</span>
+              <span class="bbi-char-tile-badges">
+                <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
+                <span class="bbi-char-pill" :class="{ 'is-book': entry.source === 'book', 'is-ai': entry.source === 'ai' }">
+                  {{ sourceLabel(entry) }}
+                </span>
+                <span v-if="globalNameSet.has(entry.name)" class="bbi-char-pill is-override" title="与全局库同名,当前聊天以本条为准">覆</span>
+                <span v-if="entry.lora?.name" class="bbi-char-pill is-lora" :title="`LoRA: ${entry.lora.name}`">L</span>
+                <span v-if="entry.history.length" class="bbi-char-history-badge" :title="`${entry.history.length} 条变更记录`">
+                  <Icon name="history" />{{ entry.history.length }}
+                </span>
+              </span>
             </li>
             </ul>
             <p v-else-if="chatEntries.length && chatSearch" class="bbi-char-empty">
@@ -2045,129 +2019,106 @@ function confirmClearAll(): void {
 }
 
 /* —— 角色列表:单列长条(方形头像 + 名字 + 右侧徽标),点整行进编辑 —— */
-.bbi-char-list {
+/* —— 角色头像格子网格:一个角色一个正方形格子,名字在格子下面 —— */
+.bbi-char-tiles {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 14px 12px;
 }
-/* 一行的四列:名字 | 图片格(有图才占) | 徽标 | 生成按钮 */
-.bbi-char-row {
-  width: 100%;
-  display: grid;
-  grid-template-columns: 128px minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 12px;
-  padding: 7px 10px 7px 8px;
+.bbi-char-tile {
+  min-width: 0;
+}
+.bbi-char-tile-box {
+  position: relative;
+  aspect-ratio: 1 / 1;
   border: 1px solid var(--bbi-line);
   border-radius: var(--bbi-radius);
-  background: var(--bbi-surface);
+  overflow: hidden;
+  background: var(--bbi-bg);
   color: var(--bbi-ink);
-  font-family: var(--bbi-font-sans);
   cursor: pointer;
-  text-align: left;
   transition:
     border-color var(--bbi-dur) var(--bbi-ease),
-    background var(--bbi-dur) var(--bbi-ease);
+    box-shadow var(--bbi-dur) var(--bbi-ease);
 }
-.bbi-char-row:hover {
+.bbi-char-tile-box:hover {
   border-color: var(--bbi-accent);
-  background: var(--bbi-accent-soft);
 }
-.bbi-char-row:focus-visible {
+.bbi-char-tile-box:focus-visible {
   outline: 2px solid var(--bbi-accent);
   outline-offset: 1px;
 }
-/* 图片格:最多 4 张,第四张装不下时收成 +N */
-.bbi-char-row-imgs {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  min-width: 0;
-}
-.bbi-char-img {
-  aspect-ratio: 1 / 1;
-  border-radius: 6px;
-  overflow: hidden;
-  border: 1px solid var(--bbi-line);
-  background: var(--bbi-bg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  color: var(--bbi-ink-muted);
-}
-.bbi-char-img.is-more {
-  border-style: dashed;
-  border-color: var(--bbi-accent);
-  color: var(--bbi-accent);
-  font-weight: 500;
-}
-.bbi-char-img img {
+.bbi-char-tile-box img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
-/* 行内生成按钮:小、靠右,点了直接用当前渠道出一张图存进图库 */
-.bbi-char-gen {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
-  border: 1px solid var(--bbi-line);
-  border-radius: 999px;
-  background: var(--bbi-surface);
-  color: var(--bbi-ink-muted);
-  font-family: var(--bbi-font-sans);
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.bbi-char-gen:hover {
-  color: var(--bbi-accent);
-  border-color: var(--bbi-accent);
-}
-.bbi-char-gen:disabled {
-  opacity: 0.5;
-  cursor: progress;
-}
-/* 头像:名字首字 + 稳定色块(图片由右侧图片格负责) */
-.bbi-char-row-id {
+/* 空头像:名字首字 + 稳定色块 */
+.bbi-char-tile-empty {
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.bbi-char-avatar {
-  flex: none;
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-  overflow: hidden;
-  display: inline-flex;
-  align-items: center;
   justify-content: center;
-  font-size: 15px;
+  font-size: 20px;
   font-weight: 500;
   user-select: none;
 }
-.bbi-char-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
+/* 格内生成按钮:底部小药丸,默认半透明不抢图,悬停/聚焦时清晰;点击即用
+   角色外貌串 + 内置头像提示词出图,存成该角色目录下的固定文件名 avatar.* */
+.bbi-char-tile-gen {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--bbi-line);
+  border-radius: 999px;
+  background: var(--bbi-surface);
+  color: var(--bbi-ink-soft);
+  font-family: var(--bbi-font-sans);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0.6;
+  transition:
+    opacity var(--bbi-dur) var(--bbi-ease),
+    color var(--bbi-dur) var(--bbi-ease),
+    border-color var(--bbi-dur) var(--bbi-ease);
 }
-.bbi-char-row-name {
-  flex: 1;
-  min-width: 0;
-  font-size: 14px;
-  font-weight: 500;
+.bbi-char-tile-gen:hover {
+  opacity: 1;
+  color: var(--bbi-accent);
+  border-color: var(--bbi-accent);
+}
+.bbi-char-tile-gen:disabled {
+  opacity: 0.85;
+  cursor: progress;
+}
+.bbi-char-tile-name {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  text-align: center;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.bbi-char-tile-badges {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  margin-top: 3px;
+  flex-wrap: wrap;
+  min-height: 18px;
 }
 
 /* —— 外貌字段:桌面两列,窄屏单列;NSFW 默认折叠 —— */
