@@ -617,16 +617,24 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
   `extensionSettings['baibai_image']` 只留路径、模型键、指纹等小型索引，禁止再放 Base64。
 
 **角色级 LoRA 动态挂载(characterLora.ts)**:角色条目可带 `lora = { name, strength, trigger }`
-(角色管理页维护,AI 永远不写)。出图时按「本图角色名」决定挂谁:
+(角色管理页维护,AI 永远不写)。外貌来源是**三选一,优先级固定**:
 
-1. 协议:库里**只要有角色绑定了 LoRA**,自动 tag 就要求每张图输出 `names`(本图角色名,
-   逐字用库中原名);没有绑定则完全不加这个键(零额外 token)。
+```
+LoRA 触发词串  >  整串(raw)  >  11 个外貌字段
+```
+
+只取最高优先级那一份,不混拼——混拼会让模型收到两套互相冲突的外貌。LoRA 模式下
+外貌字段与整串**完全不下发**。出图时按「本图角色名」决定挂谁:
+
+1. 协议:库里**只要有角色需要整串完整写入**(绑了 LoRA,或整串非空),自动 tag 就要求
+   每张图输出 `names`(本图角色名,逐字用库中原名);否则完全不加这个键(零额外 token)。
    `names` 随 tag 持久化在正文里:`<bbi_image>…<names>["林知意","User"]</names><size>…</size></bbi_image>`。
-2. 出图(`generate.ts`):`resolveCharacterLoras(names)` 取本图该挂的 LoRA 与触发词;
+2. 写回时 `ensureVerbatimItems` **确定性补齐**触发词串/整串:缺的词逐项补回、已出现的词
+   不重复、人数 tag(1girl/2girls/solo)不照搬(画面人数由本图决定);触发词缺失时放最前。
+   实测模型会把 `adnim`(LoRA 触发词)和身体词当噪声删掉,不能指望它自觉。
+3. 出图(`generate.ts`):`resolveCharacterLoras(names)` 取本图该挂的 LoRA;
    `mergeCharacterLoras` 先把渠道里**被任何角色绑定过的** LoRA 剔除(旧的全挂做法),
-   再追加本图在场角色的绑定,其余风格 LoRA 原样保留。
-3. 触发词由插件 `withTriggers` **确定性拼在最前**——模型会把不认识的触发词当噪声删掉
-   (实测 `adnim` 被丢,LoRA 不触发),不能指望它照抄。
+   再追加本图在场角色的绑定,其余风格 LoRA 原样保留。公开接口路径也走同一套补齐。
 4. 仅 ComfyUI「简易参数」模式生效:自定义工作流的节点由用户自己连,插件不往里插 LoRA 节点。
 5. 单槽「AI 重写提示词」若模型没回 `names`,沿用原 tag 里的名字(runner 兜底),
    否则重写一次就丢掉挂载信息。

@@ -27,7 +27,7 @@ import { comfySimpleParams, composeNegative, composePositive, validateSimpleConf
 import { generateComfyImage, randomSeed, type ComfyImageResult } from '@/backends/comfyui';
 import { generateNaiImage, naiRandomSeed, naiSupportsCharacterPrompts } from '@/backends/nai';
 import { effectiveOrientation, parseSize, pickSize, type Orientation } from '@/backends/size';
-import { collectBoundLoraNames, mergeCharacterLoras, resolveCharacterLoras, withTriggers } from '@/characterLora';
+import { collectBoundLoraNames, ensureVerbatimItems, mergeCharacterLoras, resolveCharacterLoras } from '@/characterLora';
 import { acquireNaiSlot } from '@/floor/genQueue';
 import type { GenerationMeta } from '@/generationMeta';
 import { charTagLib } from '@/state/charTags';
@@ -235,8 +235,10 @@ export async function generateImage(
               };
             })()
           : conn;
-      // 触发词由插件确定性拼在最前:模型会把不认识的触发词当噪声删掉,不能指望它照抄。
-      const prompt = conn.mode === 'simple' ? withTriggers(input.prompt, resolved.triggers) : input.prompt;
+      // 触发词串必须完整进入提示词:卡片路径在写回时已补齐(幂等,这里不会重复),
+      // 公开接口路径没有写回环节,由这里兜底补齐。
+      const prompt =
+        conn.mode === 'simple' ? ensureVerbatimItems(input.prompt, resolved.sources) : input.prompt;
       result = await generateComfyImage(
         runConn,
         {

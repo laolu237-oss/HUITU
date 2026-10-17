@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BBI_CHAR_EXTRA_KEY,
   applyCharTagOps,
+  buildEntryTag,
   computeLockedCharTagNames,
   createCharTagNewOp,
   createCharTagSetOp,
@@ -284,8 +285,20 @@ describe('global library merge & lock', () => {
     expect(deriveCharTags(base, chat)[0].fields.facialFeatures).toBe('long red hair');
   });
 
-  it('normalizeCharTagStore: 保留角色 LoRA 绑定并夹住强度', () => {
-    const [entry] = normalizeCharTagStore({
+  it('buildEntryTag: 三选一优先级 LoRA > 整串 > 字段', () => {
+    const fields = { ...emptyCharFields(), characterTraits: '1girl', facialFeatures: 'black hair' };
+    expect(buildEntryTag({ fields, raw: '' })).toBe('1girl, black hair');
+    expect(buildEntryTag({ fields, raw: '1girl, silver hair' })).toBe('1girl, silver hair');
+    expect(
+      buildEntryTag({
+        fields,
+        raw: '1girl, silver hair',
+        lora: { name: 'x.safetensors', strength: 1, trigger: 'adnim, grey eyes' },
+      }),
+    ).toBe('adnim, grey eyes');
+  });
+
+  it('normalizeCharTagStore: 保留角色 LoRA 绑定并夹住强度', () => {    const [entry] = normalizeCharTagStore({
       version: 3,
       entries: [
         {

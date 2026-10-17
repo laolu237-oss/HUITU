@@ -22,6 +22,7 @@ import {
   type CharTagChangeRecord,
   type CharTagEntry,
   type CharTagField,
+  type CharTagLora,
 } from '@/state/charTags';
 import {
   closetLib,
@@ -80,6 +81,8 @@ const draft = ref<Draft | null>(null);
 const draftSource = ref<CharTagEntry['source']>('manual');
 const draftDesc = ref('');
 const regenerating = ref(false);
+// 收藏:列表里置顶显示,纯用户偏好
+const draftFavorite = ref(false);
 
 /* —— 角色专属 LoRA ——
  * 绑定挂在角色条目上:只有该角色出现在画面里时,出图才挂载这个 LoRA 并把触发词拼进
@@ -210,22 +213,39 @@ function entryMatchesSearch(entry: CharTagEntry, rawQuery: string): boolean {
   }
   return false;
 }
+/** 收藏优先,其余保持原顺序(Array.sort 在现代引擎里稳定)。 */
+function favoriteFirst(entries: CharTagEntry[]): CharTagEntry[] {
+  return [...entries].sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite));
+}
+
 const filteredGlobalEntries = computed(() =>
-  globalCharTagLib.entries.filter(entry => entryMatchesSearch(entry, globalSearch.value)),
+  favoriteFirst(globalCharTagLib.entries.filter(entry => entryMatchesSearch(entry, globalSearch.value))),
 );
 const filteredChatEntries = computed(() =>
-  chatEntries.value.filter(entry => entryMatchesSearch(entry, chatSearch.value)),
+  favoriteFirst(chatEntries.value.filter(entry => entryMatchesSearch(entry, chatSearch.value))),
 );
 
-/** 是否整串模式:有 raw 且没有字段。 */
+/** 三选一优先级:LoRA 触发词 > 整串 > 字段(与 state/charTags.buildEntryTag 同口径)。 */
+const draftLora = computed<CharTagLora | undefined>(() => {
+  const name = draftLoraName.value.trim();
+  if (!name) return undefined;
+  return {
+    name,
+    strength: Math.min(2, Math.max(0, Number(draftLoraStrength.value) || 0)),
+    trigger: draftLoraTrigger.value.trim(),
+  };
+});
+const draftLoraMode = computed(() => !!draftLora.value);
+
+/** 是否整串模式:整串非空且没有绑 LoRA(绑了 LoRA 时整串不参与)。 */
 const draftIsRaw = computed(
-  () => !!draft.value && !!draft.value.raw.trim() && CHAR_TAG_FIELDS.every(f => !draft.value!.fields[f].trim()),
+  () => !!draft.value && !draftLoraMode.value && !!draft.value.raw.trim(),
 );
 
 const previewTag = computed(() => {
   const d = draft.value;
   if (!d) return '';
-  return buildEntryTag({ fields: d.fields, raw: d.raw });
+  return buildEntryTag({ fields: d.fields, raw: d.raw, lora: draftLora.value });
 });
 
 /** 正在编辑的本聊天条目的实时历史(回滚后随之刷新);全局条目不记历史。 */
@@ -332,6 +352,7 @@ function openEntry(entry: CharTagEntry, scope: Scope) {
   draftLoraName.value = entry.lora?.name ?? '';
   draftLoraStrength.value = entry.lora?.strength ?? 1;
   draftLoraTrigger.value = entry.lora?.trigger ?? '';
+  draftFavorite.value = entry.favorite === true;
   void ensureLoraOptions();
   historyOpen.value = false;
 }
@@ -346,6 +367,7 @@ function addEntry(scope: Scope = 'chat') {
   draftLoraName.value = '';
   draftLoraStrength.value = 1;
   draftLoraTrigger.value = '';
+  draftFavorite.value = false;
   void ensureLoraOptions();
   historyOpen.value = false;
 }
@@ -404,11 +426,10 @@ function confirmEntry() {
     toastr.warning('角色名不能为空', '柏宝绘');
     return;
   }
-  if (!previewTag.value) {
-    toastr.warning('至少填一个外貌字段(或整串 tag)', '柏宝绘');
+  if (!previewTag.value && !draftLora.value) {
+    toastr.warning('至少填一个外貌字段、整串 tag，或绑定一个 LoRA', '柏宝绘');
     return;
   }
-  const loraName = draftLoraName.value.trim();
   const entryData: CharTagEntry = {
     name,
     fields: d.fields,
@@ -418,13 +439,8 @@ function confirmEntry() {
     desc: draftDesc.value,
     history: [],
     // 名字留空 = 解绑;强度夹在 0–2,与 normalizeLora 同口径
-    lora: loraName
-      ? {
-          name: loraName,
-          strength: Math.min(2, Math.max(0, Number(draftLoraStrength.value) || 0)),
-          trigger: draftLoraTrigger.value.trim(),
-        }
-      : undefined,
+    lora: draftLora.value,
+    favorite: draftFavorite.value,
   };
   const ok =
     draftScope.value === 'global'
@@ -919,6 +935,7 @@ function confirmClearAll(): void {
                 <span class="bbi-char-card-head">
                   <span class="bbi-char-name">{{ entry.name }}</span>
                   <span class="bbi-char-pills">
+                    <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
                     <span class="bbi-char-pill is-global">全局</span>
                     <span v-if="charTagBaseNames.has(entry.name)" class="bbi-char-pill is-override" title="本聊天有同名角色,当前聊天以本聊天的为准">
                       本聊天已覆盖
@@ -1009,6 +1026,7 @@ function confirmClearAll(): void {
                 <span class="bbi-char-card-head">
                   <span class="bbi-char-name">{{ entry.name }}</span>
                   <span class="bbi-char-pills">
+                    <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
                     <span
                       class="bbi-char-pill"
                       :class="{ 'is-book': entry.source === 'book', 'is-ai': entry.source === 'ai' }"
@@ -1260,6 +1278,15 @@ function confirmClearAll(): void {
              关闭按钮移到 header 右上保留,避免双重动作区。 -->
         <div class="bbi-char-edit-toolbar">
           <div class="bbi-modal-foot">
+            <button
+              class="bbi-btn bbi-char-fav-btn"
+              :class="{ 'is-fav': draftFavorite }"
+              type="button"
+              :title="draftFavorite ? '取消收藏' : '收藏后排在角色列表最前面'"
+              @click="draftFavorite = !draftFavorite"
+            >
+              {{ draftFavorite ? '★ 已收藏' : '☆ 收藏' }}
+            </button>
             <button v-if="editingName" class="bbi-btn bbi-btn-danger" type="button" @click="askRemove">
               <Icon name="trash" /> 删除
             </button>
@@ -1344,7 +1371,10 @@ function confirmClearAll(): void {
         <span class="bbi-field-hint">按这个名字去正文和柏宝书角色参考里匹配;AI 引用时也用它(@角色名)。改名不会自动跟随。</span>
 
         <div class="bbi-modal-field">
-          <span class="bbi-modal-label">外貌字段</span>
+          <span class="bbi-modal-label">
+            外貌字段
+            <span v-if="draftLoraMode" class="bbi-char-pill is-lora" title="已绑定 LoRA:外貌字段不会发送给 AI">不发送</span>
+          </span>
           <div class="bbi-char-form bbi-char-form--list">
             <label v-for="f in CHAR_TAG_FIELDS" :key="f" class="bbi-char-form-row bbi-char-form-row--full">
               <span class="bbi-char-form-label">{{ CHAR_TAG_FIELD_LABELS[f] }}</span>
@@ -1362,7 +1392,10 @@ function confirmClearAll(): void {
         <span class="bbi-field-hint">只写固定基础特征;服装、表情、动作不入库,每次按剧情生成。</span>
 
         <label class="bbi-modal-field">
-          <span class="bbi-modal-label">整串模式(可选)</span>
+          <span class="bbi-modal-label">
+            整串模式(可选)
+            <span v-if="draftLoraMode" class="bbi-char-pill is-lora" title="已绑定 LoRA:整串不会发送给 AI">不发送</span>
+          </span>
           <BbiTextarea
             v-model="draft.raw"
             :rows="2"
@@ -1414,20 +1447,24 @@ function confirmClearAll(): void {
               <input
                 v-model="draftLoraTrigger"
                 class="bbi-input"
-                placeholder="如 adnim;留空则不拼触发词"
+                placeholder="如 adnim, 1girl, long hair, grey eyes;整串会完整写入,不会省略"
               />
             </label>
           </div>
         </div>
         <span class="bbi-field-hint">
-          只有该角色出现在画面里时才挂载这个 LoRA,并把触发词拼在正向提示词最前面;渠道里同名的 LoRA 会被自动剔除。
-          仅 ComfyUI「简易参数」模式生效(自定义工作流请在渠道页自行挂载)。
+          只有该角色出现在画面里时才挂载这个 LoRA;触发词串会<strong>完整写入</strong>正向提示词(缺失的词自动补齐,已有的不重复)。
+          渠道里同名的 LoRA 会被自动剔除。仅 ComfyUI「简易参数」模式生效(自定义工作流请在渠道页自行挂载)。
         </span>
+        <p v-if="draftLoraMode" class="bbi-field-hint bbi-char-lora-active">
+          当前为 <strong>LoRA 模式</strong>:外貌字段与整串<strong>不会发送</strong>给 AI,只发送触发词串(优先级:LoRA &gt; 整串 &gt; 外貌字段)。
+        </p>
 
         <div class="bbi-char-preview">
           <span class="bbi-field-label">最终 tag 预览</span>
           <code class="bbi-char-preview-tag">{{ previewTag || '(空)' }}</code>
-          <span v-if="draftIsRaw" class="bbi-char-preview-mode">整串模式</span>
+          <span v-if="draftLoraMode" class="bbi-char-preview-mode">LoRA 模式</span>
+          <span v-else-if="draftIsRaw" class="bbi-char-preview-mode">整串模式</span>
         </div>
 
         <!-- 变更历史:仅本聊天条目;全局条目无历史(AI 不可改,手动编辑不留痕) -->
@@ -1933,6 +1970,12 @@ function confirmClearAll(): void {
   border-color: var(--bbi-line);
   letter-spacing: 0.02em;
 }
+/* 收藏星标 */
+.bbi-char-pill.is-fav {
+  color: var(--bbi-warning);
+  background: var(--bbi-warning-soft);
+  border-color: transparent;
+}
 .bbi-char-pill.is-book,
 .bbi-char-pill.is-ai {
   color: var(--bbi-accent);
@@ -2213,6 +2256,15 @@ function confirmClearAll(): void {
 .bbi-char-edit-toolbar .bbi-modal-foot {
   flex-wrap: wrap;
   gap: 6px;
+}
+
+/* 收藏按钮:未收藏是中性描边,已收藏用强调色,一眼能看出状态 */
+.bbi-char-fav-btn.is-fav {
+  color: var(--bbi-accent);
+  border-color: var(--bbi-accent);
+}
+.bbi-char-lora-active {
+  color: var(--bbi-accent);
 }
 
 .bbi-closet-row {

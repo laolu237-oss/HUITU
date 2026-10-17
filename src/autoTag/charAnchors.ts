@@ -43,14 +43,27 @@ import { getTagGenChannel } from '@/state/settings';
 
 /** 把库条目渲染成给 AI 看的一行(字段式明细 + 占位符提示);锁定条目带 [locked] 标记。 */
 export function formatEntryForPrompt(entry: CharTagEntry, locked = false): string {
+  const badge = `- ${entry.name}${locked ? ' [locked]' : ''}`;
+  // 三选一,优先级固定:LoRA 触发词 > 整串 > 字段。
+  // 1) LoRA 模式:外貌与身份由 LoRA 决定,只下发触发词整串;
+  //    外貌字段/整串一律**不下发**——发了既浪费 token,又会让模型照抄出与 LoRA 冲突的特征。
+  if (entry.lora?.name.trim()) {
+    const trigger = entry.lora.trigger.trim();
+    return `${badge} [lora]: ${trigger || '(未填写触发词)'}`;
+  }
+  // 2) 整串模式:整串是唯一外貌来源,字段不再下发
+  if (entry.raw.trim()) {
+    const nl = entry.nl.trim() ? `, nl=${entry.nl.trim()}` : '';
+    return `${badge}: tag=${entry.raw.trim()}${nl}`;
+  }
+  // 3) 字段模式
   const parts: string[] = [];
   for (const f of CHAR_TAG_FIELDS) {
     const v = entry.fields[f]?.trim();
     if (v) parts.push(`${CHAR_TAG_FIELD_LABELS[f]}=${v}`);
   }
-  if (!parts.length && entry.raw.trim()) parts.push(`tag=${entry.raw.trim()}`);
   if (entry.nl.trim()) parts.push(`nl=${entry.nl.trim()}`);
-  return `- ${entry.name}${locked ? ' [locked]' : ''}: ${parts.join(', ') || '(未记录字段)'}`;
+  return `${badge}: ${parts.join(', ') || '(未记录字段)'}`;
 }
 
 /** 相关性筛选的配置。缺省(不传 corpus 或 mode='all')= 整库下发,即旧行为。 */
@@ -144,7 +157,11 @@ export function buildLibraryText(
   const lockedNote = lockedNames?.size
     ? '; entries marked [locked] are global and immutable: never report changes for them, always copy their fields as-is'
     : '';
-  const header = `【角色固定外貌库】[system-maintained; copy fields verbatim into character prompts${lockedNote}]`;
+  // [lora] 条目的冒号后是**完整 LoRA 提示词串**(触发词 + 外貌 tag):外貌字段不再下发,
+  // 该串必须整段进入画面提示词(插件会做完整性补齐,模型不要自行改写)。
+  const loraNote =
+    '; entries marked [lora] carry a complete LoRA prompt string after the colon: their appearance fields are intentionally omitted, and that whole string must enter the image prompt verbatim (never shorten, reorder, or omit any item)';
+  const header = `【角色固定外貌库】[system-maintained; copy fields verbatim into character prompts${lockedNote}${loraNote}]`;
   const isLocked = (entry: CharTagEntry) => lockedNames?.has(entry.name) ?? false;
 
   const filterOn = options.mode !== 'all' && !!(options.corpus ?? '').trim();
@@ -308,10 +325,10 @@ export function resolveCharAnchors(
 const REF_PATTERN = /@([\p{L}\p{N}_.·]+)/gu;
 
 function joinEntryTag(entry: CharTagEntry): string {
-  // 与 state/charTags.buildEntryTag 同构;重复这一小段以避开循环依赖
-  if (entry.raw.trim() && CHAR_TAG_FIELDS.every(f => !(entry.fields[f] ?? '').trim())) {
-    return entry.raw.trim();
-  }
+  // 与 state/charTags.buildEntryTag 同构(三选一:LoRA 触发词 > 整串 > 字段);
+  // 重复这一小段以避开循环依赖
+  if (entry.lora?.name.trim()) return entry.lora.trigger.trim();
+  if (entry.raw.trim()) return entry.raw.trim();
   return CHAR_TAG_FIELDS.map(f => (entry.fields[f] ?? '').trim())
     .filter(Boolean)
     .join(', ');

@@ -24,8 +24,10 @@ import {
   readCharTagFloorDelta,
   recomputeCharTags,
   type CharTagAutoOp,
+  type CharTagEntry,
   type CharTagField,
 } from '@/state/charTags';
+import { ensureVerbatimItems, type VerbatimSource } from '@/characterLora';
 import { injectImageTags, parseImagePlan, type ImagePlan } from '@/autoTag/protocol';
 import {
   clearAutoGenerateForFloor,
@@ -86,6 +88,16 @@ function abort(
 ): void {
   diagnostic('runForFloor:skip', { floor, reason, ...payload });
   if (manual) toastr.warning(hint, '柏宝绘');
+}
+
+/**
+ * 该条目是否要求「整串完整写入」。三选一优先级:LoRA 触发词 > 整串 > 字段。
+ * - 绑定了 LoRA → 触发词串必须完整(外貌由 LoRA 决定,字段/整串不下发);
+ * - 整串非空 → 整串必须完整(即使字段也填了,整串优先,字段不参与)。
+ * 字段模式的条目不在其列:按镜头取舍是设计内行为。
+ */
+function isVerbatimEntry(entry: CharTagEntry): boolean {
+  return !!entry.lora?.name.trim() || !!entry.raw.trim();
 }
 
 function activeSwipeId(message: STMessage): number | null {
@@ -320,11 +332,11 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       ? { ...settings.autoTag, minImages: 1, maxImages: 1 }
       : settings.autoTag;
     // 协议形态开跑时快照一次:写协议、验收与收尾同一份,用户中途拨开关也不会前后不一。
-    // characterNames 由库状态决定:只有真有角色绑定了 LoRA 才要求模型输出角色名,
-    // 否则这条协议对没用到该功能的用户就是纯开销。
+    // characterNames 由库状态决定:只有真有角色需要「整串完整写入」(LoRA / 整串模式)时,
+    // 才要求模型输出角色名——否则这条协议对纯字段库就是纯开销。
     const profile = {
       ...autoTagProfile(),
-      characterNames: entriesBefore.some(entry => !!entry.lora?.name.trim()),
+      characterNames: entriesBefore.some(entry => isVerbatimEntry(entry)),
     };
     // 服装库文本:与角色库同一处渲染、同一个请求里下发。空池返回空串 → prompt.ts
     // 不注入该块,任务协议的兜底句式接住(没用衣柜的用户零额外开销)。
@@ -493,6 +505,21 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           for (const n of charNl.unknown) unknownNames.add(n);
         }
       }
+      // 「必须完整写入」的词串补齐:整串模式与 LoRA 触发词串一个字符都不能少。
+      // 实测模型会把不认识的词(adnim)和身体词(large breasts)当噪声删掉;
+      // 这里按本图角色名确定性补回,已出现的词不重复加(幂等)。
+      const verbatim: VerbatimSource[] = [];
+      for (const name of image.names ?? []) {
+        const entry = anchors.entries.find(candidate => candidate.name === name.trim());
+        if (!entry) continue;
+        if (entry.lora?.name.trim()) {
+          const trigger = entry.lora.trigger.trim();
+          if (trigger) verbatim.push({ text: trigger, prependFirst: true });
+        } else if (isVerbatimEntry(entry)) {
+          verbatim.push({ text: entry.raw.trim() });
+        }
+      }
+      if (verbatim.length) image.tag = ensureVerbatimItems(image.tag, verbatim);
       for (const n of tagRes.unknown) unknownNames.add(n);
     }
     if (unknownNames.size) {

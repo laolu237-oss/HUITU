@@ -49,6 +49,24 @@ describe('formatEntryForPrompt / buildLibraryText', () => {
     expect(formatEntryForPrompt(e)).toBe('- 旧角色: tag=1girl, red eyes');
   });
 
+  it('prefers raw over structured fields (三选一优先级:整串 > 字段)', () => {
+    const e = entry('小雪', { characterTraits: '1girl', facialFeatures: 'long black hair' });
+    e.raw = '1girl, short silver hair, red eyes';
+    expect(formatEntryForPrompt(e)).toBe('- 小雪: tag=1girl, short silver hair, red eyes');
+  });
+
+  it('renders only the trigger string for LoRA entries (LoRA > 整串 > 字段)', () => {
+    const e = entry('小雪', { characterTraits: '1girl', facialFeatures: 'long black hair' });
+    e.raw = '1girl, short silver hair';
+    e.lora = { name: 'x.safetensors', strength: 1, trigger: 'adnim, long hair, grey eyes' };
+    expect(formatEntryForPrompt(e, true)).toBe(
+      '- 小雪 [locked] [lora]: adnim, long hair, grey eyes',
+    );
+    // 外貌字段与整串一个字都不能漏进提示词
+    expect(formatEntryForPrompt(e)).not.toContain('角色特征=');
+    expect(formatEntryForPrompt(e)).not.toContain('short silver hair');
+  });
+
   it('builds the library block with a header', () => {
     const text = buildLibraryText([entry('小雪', { characterTraits: '1girl' })]);
     expect(text).toContain('【角色固定外貌库');

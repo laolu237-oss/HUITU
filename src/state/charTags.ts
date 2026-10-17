@@ -101,6 +101,8 @@ export interface CharTagEntry {
   history: CharTagChangeRecord[];
   /** 角色专属 LoRA(可空);AI 永远不会写它,只由用户在角色管理页维护。 */
   lora?: CharTagLora;
+  /** 收藏:角色列表里置顶显示;纯用户偏好,AI 不碰。 */
+  favorite?: boolean;
 }
 
 export interface CharTagNewOp {
@@ -213,8 +215,18 @@ export function charFieldsEmpty(fields: Record<CharTagField, string>): boolean {
   return CHAR_TAG_FIELDS.every(field => !(fields[field] ?? '').trim());
 }
 
-export function buildEntryTag(entry: Pick<CharTagEntry, 'fields' | 'raw'>): string {
-  if (entry.raw.trim() && charFieldsEmpty(entry.fields)) return entry.raw.trim();
+/**
+ * 条目的「可出图外貌串」。**三选一,优先级固定**:
+ *   1. LoRA 绑定 → 触发词串(外貌由 LoRA 决定,字段/整串一律不下发)
+ *   2. 整串(raw)非空 → 整串
+ *   3. 否则 → 11 字段按固定顺序拼接
+ * 三者同时有值时只取最高优先级那一份,不混拼——混拼会让模型收到两套互相冲突的外貌。
+ */
+export function buildEntryTag(
+  entry: Pick<CharTagEntry, 'fields' | 'raw'> & { lora?: CharTagLora },
+): string {
+  if (entry.lora?.name.trim()) return entry.lora.trigger.trim();
+  if (entry.raw.trim()) return entry.raw.trim();
   return CHAR_TAG_FIELDS.map(field => (entry.fields[field] ?? '').trim())
     .filter(Boolean)
     .join(', ');
@@ -293,6 +305,8 @@ function normalizeEntry(raw: unknown): CharTagEntry | null {
     desc: typeof value.desc === 'string' ? value.desc : '',
     history: normalizeHistory(value.history),
     lora: normalizeLora(value.lora),
+    // 未收藏不产生该键:与存量解析结果逐字段一致
+    ...(value.favorite === true ? { favorite: true } : {}),
   };
 }
 
@@ -443,7 +457,8 @@ export function applyCharTagOps(
 
     const entry = out.find(candidate => candidate.name === op.name);
     if (!entry) continue;
-    if (op.field !== 'raw' && op.field !== 'nl' && entry.raw.trim() && charFieldsEmpty(entry.fields)) continue;
+    // 整串优先于字段:整串非空时,字段级 changes 不会影响最终出图串,直接丢弃
+    if (op.field !== 'raw' && op.field !== 'nl' && entry.raw.trim()) continue;
     const current = op.field === 'raw' ? entry.raw : op.field === 'nl' ? entry.nl : entry.fields[op.field];
     if (current === op.value) continue;
     if (op.field === 'raw') entry.raw = op.value;
@@ -572,7 +587,8 @@ export function upsertCharTag(
   opts: UpsertOptions = {},
 ): boolean {
   const name = entry.name.trim();
-  if (!name || !buildEntryTag(entry)) return false;
+  // LoRA 模式下没有外貌字段/整串是合法的:外貌由 LoRA 决定
+  if (!name || (!buildEntryTag(entry) && !entry.lora?.name)) return false;
   const previous = findCharTag(oldName ?? name);
   const next: CharTagEntry = {
     name,
@@ -587,6 +603,7 @@ export function upsertCharTag(
     // LoRA 绑定只由角色管理页维护:这里以入参为准(不传 = 解绑)。
     // 内部调用方(回滚/提升全局/复制回本聊天)都是基于现有条目展开,会自带 lora。
     lora: entry.lora ? { ...entry.lora } : undefined,
+    ...(entry.favorite === true ? { favorite: true } : {}),
   };
   if (opts.recordChanges && previous) {
     const at = Date.now();
