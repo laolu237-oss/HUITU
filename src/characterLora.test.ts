@@ -97,6 +97,28 @@ describe('stripCharacterNameTags', () => {
       stripCharacterNameTags('User \\(adnim\\), smile', [{ name: 'User', triggerToken: 'adnim' }]),
     ).toBe('smile');
   });
+
+  it('strips a Chinese library name used as an identity tag', () => {
+    expect(
+      stripCharacterNameTags('firefly, 林知意 (honkai star rail), long hair', [
+        { name: '林知意', triggerToken: 'firefly' },
+      ]),
+    ).toBe('firefly, long hair');
+  });
+
+  it('strips the copied library marker「名字 [lora]: …」', () => {
+    expect(
+      stripCharacterNameTags('adnim, User [lora]: adnim, long hair', [
+        { name: 'User', triggerToken: 'adnim' },
+      ]),
+    ).toBe('adnim, long hair');
+  });
+
+  it('keeps a word that merely starts with the same letters', () => {
+    expect(
+      stripCharacterNameTags('username plate, smile', [{ name: 'User', triggerToken: 'adnim' }]),
+    ).toBe('username plate, smile');
+  });
 });
 
 describe('character LoRA binding', () => {

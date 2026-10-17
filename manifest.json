@@ -3,9 +3,9 @@
   "loading_order": 100,
   "requires": [],
   "optional": [],
-  "js": "dist/index.js?ver=0.3.17",
+  "js": "dist/index.js?ver=0.3.18",
   "author": "柏柏（laolu237-oss 魔改）",
-  "version": "0.3.17",
+  "version": "0.3.18",
   "homePage": "https://github.com/laolu237-oss/HUITU",
   "auto_update": false,
   "minimum_client_version": "1.12.13"

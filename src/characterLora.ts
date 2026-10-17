@@ -102,9 +102,12 @@ export interface CharacterNameNoise {
 /**
  * 剔除提示词里的「角色名噪声」:
  * - 裸名字(`User`、`林知意`)——模型拿它当 tag,对生图模型无意义;
- * - `名字 (触发词)`(如 `User (adnim)`)——模型把 LoRA 触发词误当成作品名拼成身份 tag。
- *   **只在这个括号内容恰好是该角色触发词时删**:真正的身份 tag(如 `firefly (honkai star rail)`)
- *   括号里是作品名,不会被误删。
+ * - `名字 (触发词)`(如 `User (adnim)`)——模型把 LoRA 触发词误当成作品名拼成身份 tag;
+ * - `名字 [lora]: …`——模型把库行的标记也抄进了 tag;
+ * - 中文库名 + 作品名(如 `林知意 (honkai star rail)`)——中文名不是 danbooru tag,
+ *   合法身份 tag 必须用英文角色名(如 `firefly (honkai star rail)`)。
+ *
+ * **例外**:英文库名 + 括号内作品名(且括号内不是触发词)视为合法身份 tag,原样保留。
  */
 export function stripCharacterNameTags(
   tag: string,
@@ -117,10 +120,21 @@ export function stripCharacterNameTags(
       const plain = normalizeItem(name);
       if (!plain) continue;
       if (key === plain) return false;
-      const open = key.indexOf('(');
-      if (open < 0 || !key.startsWith(`${plain} (`) && !key.startsWith(`${plain}(`)) continue;
-      const inner = key.slice(open + 1, key.lastIndexOf(')')).trim();
-      if (triggerToken && inner === normalizeItem(triggerToken)) return false;
+      if (!key.startsWith(plain)) continue;
+      const boundary = key.charAt(plain.length);
+      // 必须是词边界,避免把 username 之类的词误判成角色名
+      if (boundary && !' \t([:：'.includes(boundary)) continue;
+      const rest = key.slice(plain.length).trim();
+      if (!rest) return false;
+      if (rest.startsWith('(')) {
+        const inner = rest.slice(1, rest.lastIndexOf(')')).trim();
+        const asciiName = /^[\x20-\x7E]+$/.test(name.trim());
+        // 英文名 + 作品名(非触发词)= 合法身份 tag
+        if (asciiName && inner && inner !== normalizeItem(triggerToken ?? '')) continue;
+        return false;
+      }
+      // name [lora]: … / name: … / name 其它 → 噪声
+      return false;
     }
     return true;
   });
