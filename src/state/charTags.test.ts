@@ -298,6 +298,19 @@ describe('global library merge & lock', () => {
     ).toBe('adnim, grey eyes');
   });
 
+  it('normalizeCharTagStore: 纯 LoRA 条目(无字段/整串)不被丢弃', () => {
+    const [entry] = normalizeCharTagStore({
+      version: 3,
+      entries: [
+        { name: '纯LoRA', lora: { name: 'x.safetensors', strength: 1, trigger: 'adnim' } },
+      ],
+    });
+    expect(entry?.name).toBe('纯LoRA');
+    expect(entry?.lora).toEqual({ name: 'x.safetensors', strength: 1, trigger: 'adnim' });
+    // 既没有外貌也没有 LoRA 的条目仍然丢弃(空档案没有意义)
+    expect(normalizeCharTagStore({ version: 3, entries: [{ name: '空条目' }] })).toEqual([]);
+  });
+
   it('normalizeCharTagStore: 保留角色 LoRA 绑定并夹住强度', () => {    const [entry] = normalizeCharTagStore({
       version: 3,
       entries: [

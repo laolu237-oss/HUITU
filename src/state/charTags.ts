@@ -295,7 +295,10 @@ function normalizeEntry(raw: unknown): CharTagEntry | null {
   const fields = normalizeFields(value.fields);
   const legacyTags = typeof value.tags === 'string' ? value.tags.trim() : '';
   const rawTag = typeof value.raw === 'string' ? value.raw.trim() : legacyTags;
-  if (!rawTag && charFieldsEmpty(fields)) return null;
+  const lora = normalizeLora(value.lora);
+  // 纯 LoRA 条目是合法的:外貌由 LoRA 决定,不需要外貌字段/整串。
+  // 少了这个例外,保存时会被归一化静默丢弃(界面表现为「点完成没反应」)。
+  if (!rawTag && charFieldsEmpty(fields) && !lora?.name) return null;
   return {
     name,
     fields,
@@ -304,7 +307,7 @@ function normalizeEntry(raw: unknown): CharTagEntry | null {
     source: value.source === 'book' || value.source === 'ai' ? value.source : 'manual',
     desc: typeof value.desc === 'string' ? value.desc : '',
     history: normalizeHistory(value.history),
-    lora: normalizeLora(value.lora),
+    lora,
     // 未收藏不产生该键:与存量解析结果逐字段一致
     ...(value.favorite === true ? { favorite: true } : {}),
   };

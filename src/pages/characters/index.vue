@@ -446,7 +446,12 @@ function confirmEntry() {
     draftScope.value === 'global'
       ? upsertGlobalCharTag(entryData, editingName.value ?? undefined)
       : upsertCharTag(entryData, editingName.value ?? undefined, { recordChanges: true });
-  if (ok) closeEntry();
+  // 失败必须给反馈:静默失败在界面上就是「点了完成没反应」,查不出原因
+  if (!ok) {
+    toastr.error('保存失败:角色名重复或条目为空', '柏宝绘');
+    return;
+  }
+  closeEntry();
 }
 
 /* —— 删除:二次确认 —— */
