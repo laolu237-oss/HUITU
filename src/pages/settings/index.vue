@@ -33,7 +33,7 @@ import {
   type ThemeName,
 } from '@/state/ui';
 import { checkForUpdate, performUpdate, updateState } from '@/update';
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
 const NAV_OPTIONS: { value: NavPosition; label: string }[] = [
   { value: 'auto', label: '自动' },
@@ -1336,13 +1336,6 @@ async function confirmImport() {
   color: var(--bbi-ink);
 }
 
-.bbi-auto-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin: 4px 0 8px;
-}
-
 /* —— 滑动开关:全页仅总开关一处使用 —— */
 .bbi-toggle {
   flex: 0 0 auto;
@@ -1792,9 +1785,6 @@ async function confirmImport() {
 
 /* ============ 移动端:折叠区内部正文整体收一号,与窄屏标题节奏统一 ============ */
 @media (max-width: 640px) {
-  .bbi-auto-grid {
-    grid-template-columns: 1fr;
-  }
   /* 渠道参数四连:窄屏一行四个每个只剩几十 px,落成 2×2 */
   .bbi-channel-row {
     grid-template-columns: repeat(2, 1fr);

@@ -186,11 +186,6 @@ export function buildLibraryText(
   return `${header}\n${sections.join('\n')}`;
 }
 
-/** 旧接口兼容:runner 之外仍有调用方依赖锚定文本形态。 */
-export function buildAnchorText(entries: CharTagEntry[], lockedNames?: ReadonlySet<string>): string {
-  return buildLibraryText(entries, lockedNames);
-}
-
 /* ============ 中文外貌 → 结构化字段 的批量转换 ============ */
 
 const CONVERT_SPEC = `你是外貌 tag 转换器。把给出的角色中文外貌描述拆成固定 11 字段的 danbooru 短 tag:英文小写、逗号分隔、多词用空格连接(不要用下划线)。

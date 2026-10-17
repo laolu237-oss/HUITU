@@ -336,7 +336,7 @@ async function generateFor(entry: CharTagEntry): Promise<void> {
   if (genBusy.value[entry.name]) return;
   genBusy.value = { ...genBusy.value, [entry.name]: true };
   try {
-    const { result, seed } = await generateImage(
+    const { result } = await generateImage(
       {
         prompt: buildAvatarPrompt(tag),
         size: 'portrait',
@@ -836,7 +836,7 @@ function sourceLabel(entry: CharTagEntry): string {
 
 
 /** 把手机UI单条角色数据映射成 CharTagEntry(11 字段)。无 phone 数据时返回 null。 */
-function _phoneEntryToCharTag(phoneName: string, phoneData: Record<string, unknown>): {
+function _phoneEntryToCharTag(phoneData: Record<string, unknown>): {
   fields: Record<CharTagField, string>;
   raw: string;
   nl: string;
@@ -877,7 +877,7 @@ function importFromPhoneUI(): void {
     toastr.warning(`手机UI没有「${target}」`, '柏宝绘');
     return;
   }
-  const mapped = _phoneEntryToCharTag(target, phoneData);
+  const mapped = _phoneEntryToCharTag(phoneData);
   let changed = 0;
   for (const f of CHAR_TAG_FIELDS) {
     if (mapped.fields[f] && !d.fields[f]) {
@@ -937,7 +937,7 @@ function runImportAll(mode: ImportAllMode): void {
     let skipped = 0;
     for (const nm of names) {
       const phoneData = all[nm];
-      const mapped = _phoneEntryToCharTag(nm, phoneData);
+      const mapped = _phoneEntryToCharTag(phoneData);
       if (!mapped.raw && charFieldsEmpty(mapped.fields)) {
         skipped++;
         continue;

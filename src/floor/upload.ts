@@ -44,20 +44,10 @@ export async function uploadBase64File(name: string, base64: string): Promise<st
   return path;
 }
 
-/** 上传图片。 */
-export function uploadImageFile(name: string, base64: string): Promise<string> {
-  return uploadBase64File(name, base64);
-}
-
 /** 删除已上传文件。返回 false 表示文件本就不存在（无需清理）。 */
 export async function deleteUploadedFile(path: string): Promise<boolean> {
   const { ok, status, text } = await postFile('/api/files/delete', { path });
   if (ok) return true;
   if (status === 404) return false;
   throw new FileStoreError(`文件删除失败 (${status})${text ? `：${text.slice(0, 300)}` : ''}`, status);
-}
-
-/** 删除已上传图片。 */
-export function deleteImageFile(path: string): Promise<boolean> {
-  return deleteUploadedFile(path);
 }

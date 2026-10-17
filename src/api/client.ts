@@ -413,14 +413,6 @@ export function extractContent(data: any): string {
 const MAIN_API_RESPONSE_LENGTH = 65535;
 
 /**
- * 是否具备「跟随主 API」的条件:ST 暴露了 generateRaw(稳定 API)即可。
- * 不再依赖连接管理/连接档——直接借用主界面当前正在用的 API。
- */
-export function mainApiAvailable(): boolean {
-  return typeof getContext()?.generateRaw === 'function';
-}
-
-/**
  * 用「当前主 API」(主界面正在用的聊天补全/文本补全设置)发一次补全。
  * 走 ST 的 generateRaw:只发我们给的这几条消息,不带聊天历史/角色卡;无需连接档。
  * quiet 类型内部强制非流式,返回清洗后的整段文本;失败抛 ApiError。

@@ -3,7 +3,7 @@ import Icon from '@/components/Icon.vue';
 import NavBar from '@/components/NavBar.vue';
 import FloatingOrb from '@/components/FloatingOrb.vue';
 import { getPage } from '@/pages/registry';
-import { closePanel, cycleTheme, lastOpenedAt, modalHost, THEMES, ui } from '@/state/ui';
+import { closePanel, cycleTheme, lastOpenedAt, THEMES, ui } from '@/state/ui';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 
 // 题首主题按钮:显示「下一个」主题的图标与名,点击即切换到它
