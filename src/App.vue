@@ -3,8 +3,25 @@ import Icon from '@/components/Icon.vue';
 import NavBar from '@/components/NavBar.vue';
 import FloatingOrb from '@/components/FloatingOrb.vue';
 import { getPage } from '@/pages/registry';
-import { closePanel, cycleTheme, lastOpenedAt, THEMES, ui } from '@/state/ui';
+import { closePanel, cycleTheme, lastOpenedAt, modalHost, THEMES, ui } from '@/state/ui';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
+
+/**
+ * 弹窗 Teleport 宿主:所有 ModalMask / ConfirmDialog / Lightbox / 下拉菜单都 Teleport 到它。
+ *
+ * ⚠ 必须这样显式赋值,不能靠「导入一个同名 ref,再用 ref="modalHost" 自动绑定」:
+ * 模板 ref 是字符串,编译器不会为它生成对导入变量的引用,打包时该导入会被当成未用代码摇掉;
+ * 而 modalHost 一旦为 null,各弹窗就退化成「原地渲染」——聊天侧命令式呼出的确认窗
+ * 落在 .bbi-root 之外,取不到 --bbi-* 变量,背景与遮罩全部透明。
+ * (v0.3.23 的清理提交正是把这条导入当「多余」删掉,才出现透明弹窗。)
+ */
+const modalHostEl = ref<HTMLElement | null>(null);
+onMounted(() => {
+  modalHost.value = modalHostEl.value;
+});
+onUnmounted(() => {
+  modalHost.value = null;
+});
 
 // 题首主题按钮:显示「下一个」主题的图标与名,点击即切换到它
 const nextTheme = computed(() => {
@@ -87,7 +104,7 @@ const windowStyle = computed(() => {
   <div class="bbi-root" :data-theme="ui.theme">
     <!-- 弹窗 Teleport 宿主:.bbi-root 直接子级,在 .bbi-body 滚动容器之外。
          各页弹窗 Teleport 到此,避开 iOS「可滚动祖先内 fixed 后代定位错乱」(详见 state/ui.ts)。 -->
-    <div ref="modalHost"></div>
+    <div ref="modalHostEl"></div>
     <!-- 悬浮球:留在 shadow 内才能用 --bbi-* 主题变量;自身 position:fixed 贴边,不受 host 影响 -->
     <FloatingOrb v-if="ui.showOrb" />
     <Transition name="bbi-fade">
