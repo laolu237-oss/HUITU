@@ -139,79 +139,16 @@ describe('锁定与合并语义', () => {
     expect([...charTags.lockedCharTagNames()]).toEqual(['玩家']);
   });
 
-  it('本聊天手动建同名条目 = 覆盖全局并解锁,AI 可照常变更', () => {
-    globalTags.upsertGlobalCharTag(
-      makeEntry('玩家', { characterTraits: '1boy', facialFeatures: 'short black hair' }),
-    );
-    charTags.upsertCharTag(
-      makeEntry('玩家', { characterTraits: '1boy', facialFeatures: 'long white hair' }),
-    );
-    // 解锁
-    expect(charTags.lockedCharTagNames().size).toBe(0);
-    expect(charTags.charTagBaseNames.has('玩家')).toBe(true);
-    // 本聊天值优先
-    expect(charTags.charTagLib.entries[0].fields.facialFeatures).toBe('long white hair');
-    // AI 变更生效
-    const dye = charTags.createCharTagSetOp('玩家', 'facialFeatures', 'long red hair', '染发')!;
-    ctx.chat = [
-      {
-        name: 'Char',
-        is_user: false,
-        is_system: false,
-        mes: '正文',
-        swipe_id: 0,
-        extra: { [charTags.BBI_CHAR_EXTRA_KEY]: { v: 1, swipe: 0, ops: [dye] } },
-      },
-    ];
-    charTags.recomputeCharTags();
-    expect(charTags.charTagLib.entries[0].fields.facialFeatures).toBe('long red hair');
-    // 全局库本身不被污染
-    expect(globalTags.globalCharTagLib.entries[0].fields.facialFeatures).toBe('short black hair');
-  });
-});
-
-describe('提升为全局 / 复制到本聊天', () => {
-  it('提升:快照当前生效值(含 AI 变更)进全局,清本聊天副本与楼层 ops', () => {
-    charTags.upsertCharTag(
-      makeEntry('小雪', { characterTraits: '1girl', facialFeatures: 'long black hair' }),
-    );
-    const dye = charTags.createCharTagSetOp(
-      '小雪',
-      'facialFeatures',
-      'short red hair',
-      '剪发染发',
-    )!;
-    ctx.chat = [
-      {
-        name: 'Char',
-        is_user: false,
-        is_system: false,
-        mes: '正文',
-        swipe_id: 0,
-        extra: { [charTags.BBI_CHAR_EXTRA_KEY]: { v: 1, swipe: 0, ops: [dye] } },
-      },
-    ];
-    charTags.recomputeCharTags();
-    expect(charTags.findCharTag('小雪')?.fields.facialFeatures).toBe('short red hair');
-
-    expect(globalTags.promoteCharTagToGlobal('小雪')).toBe(true);
-    // 全局拿到的是当前生效值
-    expect(globalTags.globalCharTagLib.entries[0].fields.facialFeatures).toBe('short red hair');
-    // 本聊天基线副本已删、楼层 ops 已清
-    expect(charTags.charTagBaseNames.has('小雪')).toBe(false);
-    const floorExtra = (ctx.chat[0] as { extra?: Record<string, unknown> }).extra;
-    expect(floorExtra?.[charTags.BBI_CHAR_EXTRA_KEY]).toBeUndefined();
-    // 此后该名字被锁定
-    expect([...charTags.lockedCharTagNames()]).toEqual(['小雪']);
-    expect(charTags.charTagLib.entries[0].fields.facialFeatures).toBe('short red hair');
-  });
-
-  it('复制到本聊天:全局保留,本聊天副本接管且解锁', () => {
+  // [2026-10-20] 本聊天层下线:不再有「本聊天同名覆盖全局并解锁」「提升为全局」
+  // 「复制到本聊天」这些跨层动作 —— 只剩角色库一层 + 手机UI 只读影子。
+  it('本聊天层的旧数据不会混进派生库(只在迁移时被搬出来)', () => {
     globalTags.upsertGlobalCharTag(makeEntry('玩家', { characterTraits: '1boy' }));
-    expect(globalTags.copyGlobalCharTagToChat('玩家')).toBe(true);
-    expect(globalTags.globalCharTagLib.entries).toHaveLength(1);
-    expect(charTags.charTagBaseNames.has('玩家')).toBe(true);
-    expect(charTags.lockedCharTagNames().size).toBe(0);
-    expect(charTags.findCharTag('玩家')?.fields.characterTraits).toBe('1boy');
+    ctx.chatMetadata['baibai_image_char_tags'] = {
+      version: 3,
+      entries: [makeEntry('路人', { characterTraits: '1girl' })],
+    };
+    charTags.hydrateCharTags();
+    expect(charTags.charTagLib.entries.map(entry => entry.name)).toEqual(['玩家']);
+    expect(charTags.readChatCharTagBase().map(entry => entry.name)).toEqual(['路人']);
   });
 });

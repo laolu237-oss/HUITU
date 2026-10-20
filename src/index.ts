@@ -7,6 +7,7 @@ import { registerPublicInterface } from '@/public/register';
 import { bindCharTagSync } from '@/state/charTags';
 import { initCloset } from '@/state/closet';
 import { initGlobalCharTags } from '@/state/globalCharTags';
+import { initPhoneCharTags } from '@/state/phoneCharTags';
 import { hydrateSettings } from '@/state/settings';
 import { ui } from '@/state/ui';
 import { guardEditableArrowKeys } from '@/st/keyboard';
@@ -99,6 +100,9 @@ async function hydrateWhenReady(attempt = 0) {
       await hydrateSettings();
       // 全局库必须在 bindCharTagSync 之前初始化:首次重算就要把全局条目合进派生库
       initGlobalCharTags();
+      // 手机UI 角色形象影子同理,而且它依赖全局库(同名跳过),所以排在全局之后、
+      // bindCharTagSync 之前:首次重算就要带上影子条目
+      initPhoneCharTags();
       // 服装库与角色库无耦合,只负责领养已存数据;AI 永不写它,故无顺序约束
       initCloset();
       bindCharTagSync();

@@ -127,21 +127,20 @@ describe('auto tag prompt', () => {
     expect(messages.some(m => m.content.includes('images 数量必须在 0～3 之间'))).toBe(true);
     expect(messages.some(m => m.content.includes('没有值得绘制的可见瞬间时可以返回空数组'))).toBe(true);
     expect(messages.some(m => m.content.includes('不得包含质量词'))).toBe(true);
-    expect(messages.some(m => m.content.includes('先完成角色建档与变化检查'))).toBe(true);
+    expect(messages.some(m => m.content.includes('先完成角色清点与外貌对照'))).toBe(true);
     expect(messages.some(m => m.content.includes('同一事件的相邻动作'))).toBe(true);
     expect(messages.some(m => m.content.includes('两人同框不等于必须横屏'))).toBe(true);
-    expect(messages.some(m => m.content.includes('"field":"new"'))).toBe(true);
-    // 建档示例的字段键必须到达模型。迁移到 11 字段后示例改用占位符书写
-    // （见 prompt.ts 建档写法），断言跟随源码，不再钉死具体取值。
-    expect(messages.some(m => m.content.includes('"characterTraits":"...","facialFeatures":"..."'))).toBe(true);
-    expect(messages.some(m => m.content.includes('首次出场就必须建档'))).toBe(true);
+    // [2026-10-20] changes 整体下线:协议里不得再出现任何写库字段与示例。
+    expect(messages.some(m => m.content.includes('"field":"new"'))).toBe(false);
+    expect(messages.some(m => m.content.includes('"changes"'))).toBe(false);
+    expect(messages.some(m => m.content.includes('库里没有的角色 → 只在本图里写全,不改库'))).toBe(true);
     expect(messages.some(m => m.content.includes('角色卡、世界书、柏宝书或持续剧情'))).toBe(true);
-    expect(messages.some(m => m.content.includes('characterTraits 与 facialFeatures 至少填一项'))).toBe(true);
+    expect(messages.some(m => m.content.includes('不要输出任何建档、变更、changes 之类的写库指令'))).toBe(true);
     expect(messages.some(m => m.content.includes('"position":"P2"'))).toBe(true);
-    expect(messages.some(m => m.content.includes('后续不得重新随机'))).toBe(true);
-    // 建档不受入选与否影响,也不受位置门控 —— 这两条是修复的核心,措辞必须在协议里
-    expect(messages.some(m => m.content.includes('不论他是否入选本次图片'))).toBe(true);
-    expect(messages.some(m => m.content.includes('建档在本楼全程有效'))).toBe(true);
+    expect(messages.some(m => m.content.includes('同一楼里他出现在多张图时,每张都用同一套外貌'))).toBe(true);
+    // 库外角色照样要写全固定特征(不得随机换色换脸),这是「不建档」后唯一的一致性来源
+    expect(messages.some(m => m.content.includes('不得随机换色换脸'))).toBe(true);
+    expect(messages.some(m => m.content.includes('就按「目标正文当前外貌 > 柏宝书当前状态'))).toBe(true);
     // 已撤销的 characters 审计:不得回流到协议里
     expect(messages.some(m => m.content.includes('characters'))).toBe(false);
     expect(messages.some(m => m.content.includes('"tag":"@小雪'))).toBe(false);
@@ -285,7 +284,7 @@ describe('auto tag prompt', () => {
 
     // 以下是重写前就必须守住的既有约束,逐条确认没有在重构中丢失。
     expect(thinkingMsg?.content).toContain('不得把临时状态恢复成角色默认值');
-    expect(thinkingMsg?.content).toContain('即使 images 为空也不能跳过这一步');
+    expect(thinkingMsg?.content).toContain('剧情里的染发、剪发、留疤、长大、永久变身等永久变化');
     expect(thinkingMsg?.content).toContain('视觉明确度、剧情重要度、动作完整度');
     expect(thinkingMsg?.content).toContain('下限大于 0 时从较次但仍可见的候选中补足');
     expect(thinkingMsg?.content).toContain('一次快门完整拍下');
@@ -294,22 +293,21 @@ describe('auto tag prompt', () => {
     expect(messages.some(m => m.content.includes('双人近距离构图可写 portrait'))).toBe(true);
     expect(thinkingMsg?.content).not.toContain('双人近距离可 portrait');
     expect(thinkingMsg?.content).toContain('只跳过没有视觉变化的对话');
-    expect(thinkingMsg?.content).toContain('首次出场就建档');
-    expect(thinkingMsg?.content).toContain('不论他是否入选本次图片');
-    expect(thinkingMsg?.content).toContain('建档在本楼全程有效');
-    // 建档的 hair 必须带长度/发型:只写颜色的旧措辞会让模型以 black hair 过关。
-    expect(thinkingMsg?.content).toContain('facialFeatures 必须同时带发色和长度/发型');
+    expect(thinkingMsg?.content).toContain('每人写一行结论，只有两种结果');
+    expect(thinkingMsg?.content).toContain('不要输出任何建档、变更、changes 之类的写库指令');
+    expect(thinkingMsg?.content).toContain('同一楼里同一角色不要出现两套外貌');
+    // 库里没有的角色也要写全发色+长度/瞳色:旧措辞只点名 facialFeatures,不建档后要点名「本次 tag」。
+    expect(thinkingMsg?.content).toContain('本次 tag 里必须同时带发色和长度/发型');
     expect(thinkingMsg?.content).not.toContain('hair 与 eyes 都不得留空');
     // 白皙肤色词禁令(ComfyUI 默认肤色已够白,叠 pale skin 会白得失真):
     // 规范给禁令,思维链第三层给落笔前的检查位;tan/dark skin 是豁免项。
     expect(messages.some(m => m.content.includes('白皙词一律禁止'))).toBe(true);
     expect(thinkingMsg?.content).toContain('白皙肤色词混进任何一张图');
     expect(thinkingMsg?.content).toContain('tan、dark skin 不在此列');
-    // 建档字段的详细写法瘦身后只留在任务协议一份,thinking 不再复述。
-    expect(messages.some(m => m.content.includes('建档写法：{"name":"角色名","field":"new"'))).toBe(true);
-    // 新旧档案的 position 语义、时代判断的发挥边界:瘦身后各自只留一份权威副本
-    // (分别在任务协议与后端规范),thinking 不再复述,但整套消息里必须仍在。
-    expect(messages.some(m => m.content.includes('该位置之前的图片使用旧档案'))).toBe(true);
+    // changes 下线后,协议里不该再有建档写法示例;细则只剩「本图写全」一条路。
+    expect(messages.some(m => m.content.includes('field:"new"'))).toBe(false);
+    // 新旧档案的 position 语义随 changes 一起下线;时代判断的发挥边界仍必须在。
+    expect(messages.some(m => m.content.includes('该位置之前的图片使用旧档案'))).toBe(false);
     expect(messages.some(m => m.content.includes('证据较少时可以合理补全时代风格'))).toBe(true);
     expect(thinkingMsg?.content).toContain('不得退回中性服装或默认现代都市');
     expect(thinkingMsg?.content).toContain('把未知的场景事实具体化');
@@ -319,7 +317,7 @@ describe('auto tag prompt', () => {
     expect(messages.some(m => m.content.includes('不得为了丰富画面自行添加泥地、土路'))).toBe(true);
     expect(thinkingMsg?.content).toContain('没依据就别写');
     expect(thinkingMsg?.content).toContain('没依据就删除');
-    expect(thinkingMsg?.content).toContain('只有名字实际列在【角色固定外貌库】区块中的才算已建档');
+    expect(thinkingMsg?.content).toContain('只有名字实际列在【角色固定外貌库】区块中的才算在库');
     expect(thinkingMsg?.content).toContain('按正文 P 位置维护每个角色的临时服装');
     expect(thinkingMsg?.content).toContain('视觉指纹');
     expect(thinkingMsg?.content).toContain('版型/剪裁 + 主色 + 关键部件');
@@ -340,7 +338,7 @@ describe('auto tag prompt', () => {
     expect(messages.some(m => m.content.includes('navy school blazer, white collared shirt, red ribbon'))).toBe(true);
     expect(thinkingMsg?.content).toContain('镜头外不可见的部件可以省略，但省略不等于脱掉');
     expect(thinkingMsg?.content).toContain('没有散落的无主特征');
-    expect(messages.some(m => m.content.includes('每个在场正式角色必须二选一'))).toBe(true);
+    expect(messages.some(m => m.content.includes('每个在场角色都能指出【角色固定外貌库】中的同名条目'))).toBe(true);
     expect(messages.some(m => m.content.includes('禁止把两人的外貌特征散放成无法归属的一串公共 tag'))).toBe(true);
     expect(thinkingMsg?.content).toContain('定一套具体、自洽的时代/文明/视觉体系并全楼沿用');
     expect(messages.some(m => m.content.includes('必须先判断，并主动具体化'))).toBe(true);
@@ -478,8 +476,9 @@ describe('auto tag prompt', () => {
       settings.nai.model = 'nai-diffusion-5-full';
       const nai5Messages = await buildAutoTagMessages(context(), 1, options, null);
       text = nai5Messages.map(m => m.content).join('\n');
-      expect(text).toContain('身份 tag 必须写进档案');
-      expect(text).toContain('每个同人角色的身份 tag 都逐字照抄自档案 characterTraits 字段');
+      // [2026-10-20] changes 下线:同人身份 tag 只影响画面,不再写进任何档案字段
+      expect(text).toContain('身份 tag 只影响画面');
+      expect(text).toContain('每个同人角色的身份 tag 都在其 characters[].tag 的首位');
       expect(text).toContain('若正文明确为显式 NSFW 场景');
       expect(text).toContain('若本图是显式 NSFW 场景');
       expect(text).not.toContain('若本图协议含 negative 键');
@@ -580,14 +579,15 @@ describe('auto tag prompt', () => {
       expect(text).toContain('【一次性】');
       expect(text).not.toContain('逐个列出实际在场且有名有姓的角色');
 
-      // ② 二选一 → 三选一。只改名单不改自查,那人会以合法身份上册、却在最后一关被
-      // 自己判死刑(「每个在场正式角色必须二选一」他两条都占不上)。
-      expect(text).toContain('每个在场角色都能三选一');
+      // ② 二选一 → 三选一 → (2026-10-20) 不建档后的「库里有/库里没有」两分类 + 统一的
+      // 肯定式自查句。只改名单不改自查,那人会以合法身份上册、却在最后一关被自己判死刑。
+      expect(text).toContain('每个在场角色都能指出【角色固定外貌库】中的同名条目');
       expect(text).not.toContain('每个在场正式角色都能二选一');
+      expect(text).not.toContain('每个在场角色都能三选一');
 
       // 缺档不能否决核心互动;排除无关在场者仍是合法取景。
-      expect(text).toContain('建档资格与入画资格是两回事');
-      expect(text).toContain('不得仅因缺档案放弃画面、改选瞬间或裁掉他');
+      expect(text).toContain('有没有档案与能不能入画无关');
+      expect(text).toContain('不得因为「没有档案」放弃画面、改选瞬间或裁掉他');
 
       // 个体/人群只决定入画后的落位,不决定是否值得入画。
       expect(text).toContain('拿不准是个体还是一团时按一团处理');
@@ -649,8 +649,8 @@ describe('auto tag prompt', () => {
         expect(contract).toContain('优先表现正文中玩家主角和主要角色的表情、状态、行动及关系');
         expect(contract).toContain('主要角色单独出镜同样成立');
         expect(contract).toContain('不得把不在场者加入画面');
-        expect(contract).toContain('主要角色依据设定与剧情判断，不等同于所有已建档角色');
-        expect(contract).toContain('仅仅在场不构成入画理由');
+        expect(contract).toContain('主要角色依据设定与剧情判断，不等同于库里所有已建档角色');
+        expect(contract).toContain('仅仅在场也不构成入画理由');
         expect(contract).toContain('Anonymous crowds visible in the frame remain in Base');
         expect(selection).toContain('优先选择突出玩家主角或主要角色的画面');
         expect(selection).toContain('不以有无档案或是否有名字给候选加减分');
@@ -658,7 +658,7 @@ describe('auto tag prompt', () => {
         expect(selection).toContain('若人群本身承载核心互动则保留');
         expect(thinking).toContain('清点名单不是入画名单');
         expect(thinking).toContain('每个本图可见的个体角色各写一块');
-        expect(thinking).toContain('入画时才在他自己的角色块里补外貌');
+        expect(thinking).toContain('入选画面时按后端规范给他写一条仅本图有效的角色块');
         expect(thinking).toContain('没有为了减人数破坏核心互动，也没有把无关在场者补进画面');
         expect(thinking).not.toContain('每个在场角色各');
         expect(thinking).not.toContain('入画资格只看正文是否写他在场');
@@ -773,7 +773,7 @@ describe('auto tag prompt', () => {
     expect(messages.some(m => m.content.includes('@小雪'))).toBe(false);
     expect(messages.some(m => m.content.includes('系统会替换成库中最新 tag'))).toBe(false);
     // 照抄库中字段 + 一张图只写一遍,是本次回退的两条核心措辞
-    expect(messages.some(m => m.content.includes('照抄库中/刚建档的字段值'))).toBe(true);
+    expect(messages.some(m => m.content.includes('照抄库中字段值'))).toBe(true);
     expect(messages.some(m => m.content.includes('只写一遍'))).toBe(true);
     expect(messages[messages.length - 1].content).toContain(library);
     expect(messages[messages.length - 1].content).not.toContain('currently empty');
@@ -791,9 +791,9 @@ describe('auto tag prompt', () => {
     };
     const messages = await buildAutoTagMessages(context(), 1, options, null);
 
-    // 档案会在之后每张图被照抄,姿势/场景混进字段会让角色永远保持那个姿势
-    expect(messages.some(m => m.content.includes('lying on carpet'))).toBe(true);
-    expect(messages.some(m => m.content.includes('长期不变的身体特征'))).toBe(true);
+    // 库外角色按正文写全的是**固定特征**:姿势/场景/临时状态只进本图 tag,不得写进外貌串。
+    expect(messages.some(m => m.content.includes('固定特征(发色 + 长度/发型 + 瞳色 + 体型)'))).toBe(true);
+    expect(messages.some(m => m.content.includes('临时状态不入库'))).toBe(true);
   });
 
   it('keeps first-appearance profiling enabled when BaiBai Book memory exists', async () => {
@@ -817,7 +817,9 @@ describe('auto tag prompt', () => {
       },
     );
 
-    expect(messages.some(message => message.content.includes('首次出场就必须'))).toBe(true);
+    // [2026-10-20] changes 下线后协议改口:不再是「首次出场就必须建档」,
+    // 而是「库里没有的按正文在本图写全」——柏宝书记忆仍随请求下发,但它只提供剧情状态。
+    expect(messages.some(message => message.content.includes('库里没有的角色 → 只在本图里写全,不改库'))).toBe(true);
     expect(messages.some(message => message.content.includes('柏宝书本次未提供'))).toBe(false);
   });
 
@@ -841,14 +843,17 @@ describe('auto tag prompt', () => {
       expect(messages.some(message => message.content.includes('"characters":['))).toBe(true);
       expect(messages.some(message => message.content.includes('source# / target# / mutual#'))).toBe(true);
       expect(messages.some(message => message.content.includes('Character tag uses girl/boy without a numeric count'))).toBe(true);
-      expect(messages.some(message => message.content.includes('every field:"new" change must include a non-empty nl'))).toBe(true);
+      // changes 下线:不再要求「新建档必须带 nl」,也不再出现任何写库字段。
+      expect(messages.some(message => message.content.includes('every field:"new" change must include a non-empty nl'))).toBe(false);
+      expect(messages.some(message => message.content.includes('"changes"'))).toBe(false);
       expect(messages.some(message => message.content.includes('Expression and gaze are mandatory for every character'))).toBe(true);
       // Base 的全局性对 tag 与 nl 同样成立:实跑里模型把单角色的制服/体型写进 Base nl,
       // 与角色 nl 重复——旧文本只把禁令写在 tag 层面。
       expect(messages.some(message => message.content.includes('this applies to the Base nl as much as to the Base tag'))).toBe(true);
       expect(messages.some(message => message.content.includes('never put one character\'s appearance, outfit, or individual action in the Base nl'))).toBe(true);
-      // 建档 nl 只写固定外貌:临时服装进了永久档案的 nl,会跟着之后每楼走。
-      expect(messages.some(message => message.content.includes('temporary states never enter the profile'))).toBe(true);
+      // 建档 nl 只写固定外貌的嘱咐随 changes 一起下线;但「不要写临时状态」的意图仍在
+      // 任务协议里(临时状态只进本图 tag,不进任何库)。
+      expect(messages.some(message => message.content.includes('temporary states never enter the profile'))).toBe(false);
     } finally {
       settings.defaultBackend = oldBackend;
       settings.nai.model = oldModel;
@@ -1151,7 +1156,8 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
           .join('\n');
         expect(on).toContain('"nl":"A girl stands in a classroom');
         expect(on).toContain('Save adjectival nuance for nl.');
-        expect(on).toContain('every field:"new" change must include a non-empty nl');
+        // changes 下线后这条要求整条不存在,开关打开也不该冒出来
+        expect(on).not.toContain('every field:"new" change must include a non-empty nl');
         expect(on).toContain('不写完整 nl 句');
         expect(on).not.toContain('This output is tag-only');
         expect(on).not.toContain('本次只写 tag');
@@ -1213,7 +1219,7 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       const contract = pick(await buildAutoTagMessages(context(), 1, options(), null), CONTRACT_MARK);
       expect(contract).toContain('锁定为横图，每张图都填 "landscape"');
       expect(contract).toContain('判据本次不适用');
-      expect(contract).toContain('"size":"landscape"}],"changes":[]}');
+      expect(contract).toContain('"size":"landscape"}]}');
       expect(contract).not.toContain('拿不准就填 "portrait"');
     } finally {
       state.restore();
@@ -1228,7 +1234,7 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       state.preset.orientationLock = 'portrait';
       let contract = pick(await buildAutoTagMessages(context(), 1, options(), null), CONTRACT_MARK);
       expect(contract).toContain('锁定为竖图，每张图都填 "portrait"');
-      expect(contract).toContain('"size":"portrait"}],"changes":[]}');
+      expect(contract).toContain('"size":"portrait"}]}');
 
       state.preset.orientationLock = 'auto';
       contract = pick(await buildAutoTagMessages(context(), 1, options(), null), CONTRACT_MARK);

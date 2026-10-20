@@ -14,6 +14,7 @@ import {
   lockedCharTagNames,
   type CharTagEntry,
 } from '@/state/charTags';
+import { phoneCharTagLib } from '@/state/phoneCharTags';
 import { PLUGIN_VERSION } from '@/version';
 import {
   PUBLIC_API_VERSION,
@@ -124,7 +125,10 @@ export function toPublicError(error: unknown): PublicError {
 
 /* —— 角色列表 —— */
 
-function toPublicCharacter(entry: CharTagEntry, locked: ReadonlySet<string>): PublicCharacter {
+function toPublicCharacter(
+  entry: CharTagEntry,
+  scope: PublicCharacter['scope'],
+): PublicCharacter {
   return {
     name: entry.name,
     // tag 用 buildEntryTag 现算,不自己拼:它是「字段 → tag 串」的唯一口径
@@ -133,13 +137,22 @@ function toPublicCharacter(entry: CharTagEntry, locked: ReadonlySet<string>): Pu
     fields: { ...entry.fields },
     nl: entry.nl,
     source: entry.source,
-    // 锁定名 = 全局库有、本聊天没同名覆盖。这正是「全局条目」的判据
-    // (见 charTags.ts computeLockedCharTagNames),不必另立标记
-    scope: locked.has(entry.name) ? 'global' : 'chat',
+    scope,
     desc: entry.desc,
     // history 刻意不给:50 条变更记录对第三方无用,而**给出去就删不掉了**
     // (删字段要升 apiVersion)。真有人要,日后加个 options 开关即可。
   };
+}
+
+/**
+ * 条目的作用域。
+ *
+ * [2026-10-20] 本聊天层下线后只剩两种真实来源:角色库(跨聊天)与手机UI 影子(按聊天只读)。
+ * 老的 'chat' 仍保留在类型里给历史消费方兜底,但正常情况下不会再产生。
+ */
+function scopeOf(name: string, locked: ReadonlySet<string>): PublicCharacter['scope'] {
+  if (phoneCharTagLib.entries.some(entry => entry.name === name)) return 'phone';
+  return locked.has(name) ? 'global' : 'chat';
 }
 
 export function getCharacters(options: GetCharactersOptions = {}): PublicCharacterList {
@@ -156,7 +169,7 @@ export function getCharacters(options: GetCharactersOptions = {}): PublicCharact
     revision,
     floor: floor ?? null,
     // map 出的对象已是新建的普通对象(fields 也展开过),不含 reactive 代理
-    characters: entries.map(entry => toPublicCharacter(entry, locked)),
+    characters: entries.map(entry => toPublicCharacter(entry, scopeOf(entry.name, locked))),
   };
 }
 

@@ -15,13 +15,9 @@ import {
   CHAR_TAG_FIELD_LABELS,
   buildEntryTag,
   charFieldsEmpty,
-  charTagBaseNames,
   charTagLib,
   emptyCharFields,
   findCharTag,
-  removeCharTag,
-  rollbackCharTag,
-  upsertCharTag,
   type CharTagChangeRecord,
   type CharTagEntry,
   type CharTagField,
@@ -39,18 +35,29 @@ import {
   type ClosetOutfit,
 } from '@/state/closet';
 import {
-  copyGlobalCharTagToChat,
   globalCharTagLib,
-  promoteCharTagToGlobal,
   removeGlobalCharTag,
+  removeGlobalCharTagsByNames,
+  setGlobalCharTagsFavoriteByNames,
   upsertGlobalCharTag,
 } from '@/state/globalCharTags';
+import {
+  drainLegacyChatCharTagsToGlobal,
+  purgeLegacyChatCharTags,
+  summarizeLegacyChatCharTags,
+  type LegacyChatTagSummary,
+} from '@/state/charMigration';
 import { getContext } from '@/st/context';
 import { fetchComfyModelLists } from '@/backends/comfyObjectInfo';
 import { settings } from '@/state/settings';
 import { listUserImageFolders, listUserImages, uploadUserImage } from '@/st/images';
 import { phoneAppearanceMissHint, readPhoneAppearance } from '@/st/phoneAppearance';
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import {
+  phoneCharTagLib,
+  refreshPhoneCharTags,
+  watchPhoneCharTags,
+} from '@/state/phoneCharTags';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 
 /**
  * 角色管理 —— 两层固定外貌库:
@@ -77,9 +84,6 @@ interface Draft {
 
 // editingName:正在编辑的已有条目名;null = 新建。弹窗开关以 draft 是否存在为准。
 const editingName = ref<string | null>(null);
-// editingScope:被编辑条目所在层;draftScope:草稿保存到哪层(仅新建时可选)。
-const editingScope = ref<Scope>('chat');
-const draftScope = ref<Scope>('chat');
 const draft = ref<Draft | null>(null);
 // 草稿来源:手改内容即转 manual;「从柏宝书重新生成」后转 book。
 const draftSource = ref<CharTagEntry['source']>('manual');
@@ -106,12 +110,6 @@ const moreOptions = computed(() => {
     { value: 'import-phone', label: '从手机 UI 导入', icon: 'download' },
     { value: 'regen', label: '从柏宝书生成', icon: 'refresh' },
   ];
-  if (editingName.value && editingScope.value === 'chat') {
-    items.unshift({ value: 'promote', label: '提升为全局', icon: 'star' });
-  }
-  if (editingName.value && editingScope.value === 'global') {
-    items.unshift({ value: 'copy', label: '复制到本聊天', icon: 'copy' });
-  }
   return items;
 });
 watch(moreAction, value => {
@@ -120,8 +118,6 @@ watch(moreAction, value => {
   if (value === 'clear') askClearAll();
   else if (value === 'import-phone') void importFromPhoneUI();
   else if (value === 'regen') void regenerateFromBook();
-  else if (value === 'promote') askPromote();
-  else if (value === 'copy') copyToChat();
 });
 
 /* —— 角色专属 LoRA ——
@@ -148,11 +144,7 @@ async function ensureLoraOptions(): Promise<void> {
     loraLoading.value = false;
   }
 }
-// 弹窗内历史面板开关
-const historyOpen = ref(false);
-// 回滚确认
-const confirmRollbackOpen = ref(false);
-const pendingRollback = ref<{ name: string; record: CharTagChangeRecord } | null>(null);
+// 弹窗内历史面板/回滚已随「本聊天层」一起下线(全局条目本来就无 history)
 
 /* —— 服装库 ——
    列表是**页内视图**(点标题右侧入口整页切过去);而**表单是弹窗**。
@@ -221,19 +213,122 @@ const FIELD_PLACEHOLDERS: Record<CharTagField, string> = {
   fullBodyNSFWBack: '如 firm rounded muscular glutes, thick powerful thighs',
 };
 
-/** 全局库名字集(响应式),用于分区与「覆盖」徽标。 */
+/** 角色库(全局)名字集(响应式),用于把影子与库分开。 */
 const globalNameSet = computed(() => new Set(globalCharTagLib.entries.map(entry => entry.name)));
 
 /**
- * 本聊天分区 = 派生库里「属于本聊天」的条目:
- * 本聊天基线里的(含覆盖全局的同名条目)+ 非全局的(AI 楼层建档等)。
- * 纯全局条目只出现在全局分区。
+ * 手机UI 分区 = 派生库里「不在角色库」的条目,也就是手机UI 影子。
+ * 角色形象只有两个地方:柏宝绘(角色库)+ 手机UI;库里有同名的以库为准(影子层已过滤)。
  */
 const chatEntries = computed(() =>
-  charTagLib.entries.filter(
-    entry => charTagBaseNames.has(entry.name) || !globalNameSet.value.has(entry.name),
-  ),
+  charTagLib.entries.filter(entry => !globalNameSet.value.has(entry.name)),
 );
+
+/* —— 手机UI 角色形象影子(只读) ——
+ * 外貌真源在手机UI:这边只读镜像,不落盘。要改/要收藏/要绑 LoRA 就「添加到全局」固化进角色库。 */
+
+/** 轮询停止句柄(不在模板里用,不需要响应式)。 */
+let stopPhoneWatch: (() => void) | null = null;
+/** 只读详情弹窗:非 null = 打开(直接存派生条目,内容随影子刷新而变)。 */
+const phoneViewName = ref('');
+const phoneViewEntry = computed(() => {
+  if (!phoneViewName.value) return null;
+  return charTagLib.entries.find(entry => entry.name === phoneViewName.value) ?? null;
+});
+/**
+ * 只读弹窗的字段分组:与编辑弹窗同一套分组与排列(SFW 两列网格 / NSFW 单独一段 / 整串 / 预览),
+ * 差别只是值渲染成不可编辑的盒子。两个弹窗长得一样,用户才不会以为「手机UI 那套是另一种数据」。
+ */
+type PhoneViewRow = { key: string; label: string; value: string };
+function phoneViewRows(fields: readonly CharTagField[]): PhoneViewRow[] {
+  const entry = phoneViewEntry.value;
+  if (!entry) return [];
+  return fields
+    .map(field => ({ key: field as string, label: CHAR_TAG_FIELD_LABELS[field], value: entry.fields[field] ?? '' }))
+    .filter(row => row.value.trim());
+}
+const phoneViewSfw = computed(() => phoneViewRows(SFW_FIELDS));
+const phoneViewNsfw = computed(() => phoneViewRows(NSFW_FIELDS));
+const phoneViewRaw = computed(() => phoneViewEntry.value?.raw.trim() ?? '');
+const phoneViewPreview = computed(() => (phoneViewEntry.value ? buildEntryTag(phoneViewEntry.value) : ''));
+const phoneViewEmpty = computed(
+  () => !phoneViewSfw.value.length && !phoneViewNsfw.value.length && !phoneViewRaw.value,
+);
+/** 只读弹窗也走页签:与编辑弹窗同一套分组(外貌字段 / NSFW / LoRA),切页不会跳版式。 */
+const phoneViewTab = ref<DialogTab>('fields');
+/** 复制/固化被拦的理由:全局已有同名(理论上进不了这个弹窗,防御性保留)。 */
+const phoneCopyBlocked = computed(() => !!phoneViewEntry.value && globalNameSet.value.has(phoneViewEntry.value.name));
+
+function openPhoneView(entry: CharTagEntry): void {
+  phoneViewName.value = entry.name;
+  phoneViewTab.value = 'fields';
+}
+function closePhoneView(): void {
+  phoneViewName.value = '';
+}
+
+/**
+ * 添加到全局 = 把这条手机UI 形象固化进角色库(所有聊天共用,AI 不会改)。
+ * 也是「给手机UI 的角色绑 LoRA / 收藏」的唯一入口 —— 影子本身存不了任何东西。
+ */
+function addPhoneEntryToGlobal(): void {
+  const entry = phoneViewEntry.value;
+  if (!entry) return;
+  if (globalNameSet.value.has(entry.name)) {
+    toastr.info(`「${entry.name}」已经在角色库里了,以库里那份为准`, '柏宝绘');
+    return;
+  }
+  const ok = upsertGlobalCharTag({
+    name: entry.name,
+    fields: { ...entry.fields },
+    raw: entry.raw,
+    nl: entry.nl,
+    // 来源仍记 phone:一眼看出它来自手机UI
+    source: 'phone',
+    desc: '从手机UI『角色形象』固化',
+    history: [],
+  });
+  if (ok) {
+    toastr.success(`已把「${entry.name}」添加到角色库(所有聊天生效),可以接着绑 LoRA 了`, '柏宝绘');
+    closePhoneView();
+  } else {
+    toastr.error('添加失败(条目为空或保存出错)', '柏宝绘');
+  }
+}
+
+function refreshPhoneMirror(): void {
+  const changed = refreshPhoneCharTags(true);
+  if (changed) toastr.success('已刷新手机UI 角色形象', '柏宝绘');
+  else toastr.info('手机UI 角色形象没有变化', '柏宝绘');
+}
+
+/* —— 旧「本聊天层」的处置 ——
+ * 角色形象只有两个地方(柏宝绘角色库 + 手机UI),旧的第三层已经下线:不再参与出图。
+ * 数据还在聊天文件里,所以给两个明确出口 —— 并入角色库,或直接删掉;不做静默迁移。 */
+const legacyTags = ref<LegacyChatTagSummary | null>(null);
+const confirmPurgeLegacyOpen = ref(false);
+
+function refreshLegacy(): void {
+  const summary = summarizeLegacyChatCharTags();
+  legacyTags.value = summary.base || summary.floorOnly ? summary : null;
+}
+
+function drainLegacy(): void {
+  const { moved, skipped } = drainLegacyChatCharTagsToGlobal();
+  refreshLegacy();
+  toastr.success(`已并入角色库 ${moved} 条${skipped ? `,跳过 ${skipped} 条(库里已有同名)` : ''}`, '柏宝绘');
+}
+
+function askPurgeLegacy(): void {
+  confirmPurgeLegacyOpen.value = true;
+}
+
+function confirmPurgeLegacy(): void {
+  confirmPurgeLegacyOpen.value = false;
+  const { removed } = purgeLegacyChatCharTags();
+  refreshLegacy();
+  toastr.success(`已删除旧的「本聊天角色」数据 ${removed} 条`, '柏宝绘');
+}
 
 /* —— 角色头像 ——
  * 一个角色一个正方形格子:有头像显示头像(`柏宝绘_<角色名>/avatar.*`),
@@ -318,6 +413,17 @@ async function loadAvatars(): Promise<void> {
 
 onMounted(() => {
   void loadAvatars();
+  // 手机UI 角色形象影子:进页面先读一次,并开始 2s 准实时轮询
+  // (手机UI 那边一生成,这里不用切页就能看到;离开页面时停掉,不常驻)
+  refreshPhoneCharTags(true);
+  stopPhoneWatch = watchPhoneCharTags();
+  // 旧的「本聊天层」有没有残留,决定要不要显示那条处置提示
+  refreshLegacy();
+});
+
+onUnmounted(() => {
+  stopPhoneWatch?.();
+  stopPhoneWatch = null;
 });
 
 /* —— 格子里的「生成」按钮 ——
@@ -388,6 +494,57 @@ const filteredChatEntries = computed(() =>
   favoriteFirst(chatEntries.value.filter(entry => entryMatchesSearch(entry, chatSearch.value))),
 );
 
+/* —— 批量:收藏当前列表 / 清除非收藏 ——
+ * 角色库长起来(从手机UI 导过一次就几十条)之后,「一条条点进去删」不现实;
+ * 而收藏是唯一能表达「这条别动」的标记,所以清理只碰未收藏的:
+ *   收藏 = 用户明说要留 == 清理的安全边界。
+ *
+ * 口径:**只作用于当前可见列表**(搜索生效时就是筛选结果)。这样带搜索点清理不会
+ * 误伤看不见的条目;标签上直接写条数,点之前就知道要删多少。
+ * 为什么批量入口放区块内部而不是标题行:标题行已经是「折叠 + 搜索 + ＋」三件套,
+ * 手机窄屏再挤两个按钮会把搜索框压到 100px 以下。 */
+const confirmClearOpen = ref(false);
+
+function nonFavoriteOf(): CharTagEntry[] {
+  return filteredGlobalEntries.value.filter(entry => entry.favorite !== true);
+}
+/** 清理确认框要显示的数字:待删条数 / 收藏保留条数。 */
+const clearPreview = computed(() => {
+  const names = nonFavoriteOf().map(entry => entry.name);
+  const kept = filteredGlobalEntries.value.length - names.length;
+  return { names, kept };
+});
+
+function askClearNonFavorite(): void {
+  if (!nonFavoriteOf().length) {
+    toastr.info('当前列表里没有可清除的未收藏角色', '柏宝绘');
+    return;
+  }
+  confirmClearOpen.value = true;
+}
+function confirmClearNonFavorite(): void {
+  confirmClearOpen.value = false;
+  const names = clearPreview.value.names;
+  if (!names.length) return;
+  const removed = removeGlobalCharTagsByNames(names);
+  if (removed > 0) toastr.success(`已清除 ${removed} 个未收藏角色`, '柏宝绘');
+  else toastr.info('没有条目被删除(可能已不存在)', '柏宝绘');
+}
+
+function favoriteVisible(): void {
+  const names = filteredGlobalEntries.value.map(entry => entry.name);
+  if (!names.length) {
+    toastr.info('角色库当前列表是空的', '柏宝绘');
+    return;
+  }
+  const changed = setGlobalCharTagsFavoriteByNames(names, true);
+  if (changed > 0) {
+    toastr.success(`已收藏 ${changed} 个角色,清理时会保留它们`, '柏宝绘');
+  } else {
+    toastr.info('当前列表里的角色都已经收藏了', '柏宝绘');
+  }
+}
+
 /** 三选一优先级:LoRA 触发词 > 整串 > 字段(与 state/charTags.buildEntryTag 同口径)。 */
 const draftLora = computed<CharTagLora | undefined>(() => {
   const name = draftLoraName.value.trim();
@@ -411,11 +568,7 @@ const previewTag = computed(() => {
   return buildEntryTag({ fields: d.fields, raw: d.raw, lora: draftLora.value });
 });
 
-/** 正在编辑的本聊天条目的实时历史(回滚后随之刷新);全局条目不记历史。 */
-const editingHistory = computed<CharTagChangeRecord[]>(() => {
-  if (!editingName.value || editingScope.value !== 'chat') return [];
-  return findCharTag(editingName.value)?.history ?? [];
-});
+/* 变更历史已随「本聊天层」下线:角色库条目本来就不记 history(见 state/globalCharTags)。 */
 
 /**
  * 表单能否保存:名称与词串是必填。
@@ -479,10 +632,14 @@ function toggleClosetGroup(group: ClosetGroup) {
   persistClosetFold();
 }
 
-function openEntry(entry: CharTagEntry, scope: Scope) {
+/**
+ * 打开角色库条目的编辑弹窗。
+ *
+ * [2026-10-20] 本聊天层下线后只剩一层(角色库),所以不再有 scope 参数;
+ * 手机UI 的条目走 `openPhoneView`(只读详情),不会进到这里。
+ */
+function openEntry(entry: CharTagEntry) {
   editingName.value = entry.name;
-  editingScope.value = scope;
-  draftScope.value = scope;
   draft.value = {
     name: entry.name,
     fields: { ...emptyCharFields(), ...entry.fields },
@@ -497,13 +654,11 @@ function openEntry(entry: CharTagEntry, scope: Scope) {
   draftFavorite.value = entry.favorite === true;
   dialogTab.value = 'fields';
   void ensureLoraOptions();
-  historyOpen.value = false;
 }
 
-function addEntry(scope: Scope = 'chat') {
+/** 新建条目(只进角色库;不再有「保存到本聊天/全局」的选择)。 */
+function addEntry() {
   editingName.value = null;
-  editingScope.value = scope;
-  draftScope.value = scope;
   draft.value = { name: '', fields: emptyCharFields(), raw: '', nl: '' };
   draftSource.value = 'manual';
   draftDesc.value = '';
@@ -513,7 +668,6 @@ function addEntry(scope: Scope = 'chat') {
   draftFavorite.value = false;
   dialogTab.value = 'fields';
   void ensureLoraOptions();
-  historyOpen.value = false;
 }
 
 /* —— 分区折叠(参照柏宝书「计划/悬念」)——
@@ -553,13 +707,33 @@ function closeEntry() {
   editingName.value = null;
   draft.value = null;
   regenerating.value = false;
-  historyOpen.value = false;
 }
 
-/** 手动编辑过的字段 → 条目归手动(但仍可被 AI 变更接管) */
+/** 手动编辑过的字段 → 条目归手动 */
 function markManual() {
   draftSource.value = 'manual';
   draftDesc.value = '';
+}
+
+/**
+ * 收藏开关(即时生效)。
+ *
+ * 收藏是**列表偏好**,不是条目内容:点一下就该记住,不该要求再点「完成」——
+ * 实测用户点了「☆ 收藏」看到变成「★ 已收藏」就直接关掉弹窗,结果是没存,
+ * 回头「清除非收藏」把刚收藏的那条也删了。
+ * 只有「新建中的草稿」还没有条目可挂,才先记在草稿里、保存时写入。
+ */
+function toggleFavorite(): void {
+  const next = !draftFavorite.value;
+  draftFavorite.value = next;
+  const name = editingName.value;
+  if (!name) return;
+  if (setGlobalCharTagsFavoriteByNames([name], next)) {
+    toastr.success(next ? `已收藏「${name}」,清理时会保留它` : `已取消收藏「${name}」`, '柏宝绘');
+  } else {
+    // 条目可能刚被改名/已不存在:退回「保存时生效」,别让用户以为没点上
+    toastr.info('这条还没保存过(或刚改名),先点「完成」保存后再收藏', '柏宝绘');
+  }
 }
 
 function confirmEntry() {
@@ -586,10 +760,7 @@ function confirmEntry() {
     lora: draftLora.value,
     favorite: draftFavorite.value,
   };
-  const ok =
-    draftScope.value === 'global'
-      ? upsertGlobalCharTag(entryData, editingName.value ?? undefined)
-      : upsertCharTag(entryData, editingName.value ?? undefined, { recordChanges: true });
+  const ok = upsertGlobalCharTag(entryData, editingName.value ?? undefined);
   // 失败必须给反馈:静默失败在界面上就是「点了完成没反应」,查不出原因
   if (!ok) {
     toastr.error('保存失败:角色名重复或条目为空', '柏宝绘');
@@ -606,31 +777,7 @@ function askRemove() {
 function confirmRemove() {
   confirmDeleteOpen.value = false;
   if (!editingName.value) return;
-  if (editingScope.value === 'global') removeGlobalCharTag(editingName.value);
-  else removeCharTag(editingName.value);
-  closeEntry();
-}
-
-/* —— 提升为全局 / 复制到本聊天 —— */
-const confirmPromoteOpen = ref(false);
-function askPromote() {
-  confirmPromoteOpen.value = true;
-}
-function confirmPromote() {
-  confirmPromoteOpen.value = false;
-  if (!editingName.value) return;
-  if (promoteCharTagToGlobal(editingName.value)) {
-    toastr.success(`「${editingName.value}」已提升为全局角色,所有聊天生效`, '柏宝绘');
-  }
-  closeEntry();
-}
-
-function copyToChat() {
-  if (!editingName.value) return;
-  const name = editingName.value;
-  if (copyGlobalCharTagToChat(name)) {
-    toastr.success(`已把「${name}」复制到本聊天,之后本聊天以副本为准`, '柏宝绘');
-  }
+  removeGlobalCharTag(editingName.value);
   closeEntry();
 }
 
@@ -675,31 +822,7 @@ async function regenerateFromBook() {
   }
 }
 
-/* —— 历史展示与回滚(仅本聊天条目) —— */
-function fieldLabel(field: CharTagChangeRecord['field']): string {
-  if (field === 'new') return '建档';
-  if (field === 'raw') return '整串';
-  if (field === 'nl') return '自然语言';
-  return CHAR_TAG_FIELD_LABELS[field];
-}
-
-function askRollback(record: CharTagChangeRecord) {
-  if (!editingName.value) return;
-  pendingRollback.value = { name: editingName.value, record };
-  confirmRollbackOpen.value = true;
-}
-
-function confirmRollback() {
-  confirmRollbackOpen.value = false;
-  const p = pendingRollback.value;
-  pendingRollback.value = null;
-  if (!p) return;
-  if (rollbackCharTag(p.name, p.record)) {
-    toastr.success(`已回滚「${p.name}」的${fieldLabel(p.record.field)}变更`, '柏宝绘');
-  } else {
-    toastr.warning('回滚失败:条目可能已删除', '柏宝绘');
-  }
-}
+/* —— 历史展示(只读):角色库条目不记 history,这里始终为空;保留计算属性是为了模板不报错 —— */
 
 /* ============ 服装库 ============ */
 
@@ -821,10 +944,6 @@ function confirmDeleteClosetCategory() {
 /** 删除确认框里要报出「里面有几套」——用户得知道会牵动多少条目。 */
 function countOutfitsInCategory(categoryId: string): number {
   return closetLib.outfits.filter(outfit => outfit.categoryId === categoryId).length;
-}
-
-function sourceLabel(entry: CharTagEntry): string {
-  return entry.source === 'book' ? '柏宝书' : entry.source === 'ai' ? 'AI 维护' : '手动';
 }
 
 /* —— [v11·2026-10-14] 一键导入手机UI —— */
@@ -1010,10 +1129,10 @@ function confirmClearAll(): void {
         <button
           class="bbi-btn bbi-btn-import-all"
           type="button"
-          title="把手机UI『角色外观缓存』里所有角色一键导入到柏宝绘全局角色库(弹窗选择全部覆盖 或 只导入新角色)"
+          title="可选:把手机UI『角色形象』里所有角色一次性**固化**进角色库。日常不需要点它——影子已经以只读镜像列在下面,单个角色用「添加到角色库」更精准"
           @click="askImportAll"
         >
-          <Icon name="download" /> 一键导入手机UI
+          <Icon name="download" />批量固化到角色库
         </button>
         <button class="bbi-btn bbi-btn-sm" type="button" title="打开服装库" @click="openCloset">
           <Icon name="wardrobe" />
@@ -1024,10 +1143,25 @@ function confirmClearAll(): void {
       <hr class="bbi-rule" />
   
       <p class="bbi-field-hint">
-        角色固定外貌库:生成 tag 时 AI 照抄库中字段,稳定不漂移。服装库见右上角。
+        柏宝绘的角色库(所有聊天共用):这里放你固定的形象与 LoRA 绑定;手机UI『角色形象』只做只读镜像。
+        手机UI 出图与柏宝绘出图都优先读这里;AI 只写画面提示词,不改库。
       </p>
-  
-      <!-- ===== 全局角色库 ===== -->
+
+      <!-- 旧的「本聊天层」已下线:数据还留在聊天文件里,给两个明确出口,别让它变成看不见的幽灵档案 -->
+      <div v-if="legacyTags" class="bbi-phone-status is-warn bbi-legacy-bar">
+        <span class="bbi-phone-status-text">
+          发现旧「本聊天角色」数据:<strong>{{ legacyTags.base }}</strong> 条手动条目<template v-if="legacyTags.floorOnly"> + <strong>{{ legacyTags.floorOnly }}</strong> 个楼层建档名字</template>。
+          它们已不再参与出图。
+        </span>
+        <button class="bbi-btn bbi-btn-sm" type="button" title="把旧条目并入上面的角色库(同名跳过),然后清空旧数据" @click="drainLegacy">
+          并入角色库
+        </button>
+        <button class="bbi-btn bbi-btn-sm bbi-bulk-danger" type="button" title="直接删掉旧的「本聊天角色」数据,不并入" @click="askPurgeLegacy">
+          删除
+        </button>
+      </div>
+
+      <!-- ===== 角色库(原「全局角色库」) ===== -->
       <div class="bbi-char-section">
         <div class="bbi-char-section-head">
           <button
@@ -1036,11 +1170,11 @@ function confirmClearAll(): void {
             :class="{ 'is-static': !globalFoldable }"
             :disabled="!globalFoldable"
             :aria-expanded="globalShown"
-            :title="globalFoldable ? (globalShown ? '收起全局角色库' : '展开全局角色库') : ''"
+            :title="globalFoldable ? (globalShown ? '收起角色库' : '展开角色库') : ''"
             @click="toggleFold('global')"
           >
             <Icon v-if="globalFoldable" name="chevron" class="bbi-fold-caret" :class="{ 'is-collapsed': !globalShown }" />
-            <span class="bbi-field-label">全局角色库</span>
+            <span class="bbi-field-label">角色库</span>
             <span v-if="globalFoldable" class="bbi-count">{{ globalCharTagLib.entries.length }}</span>
           </button>
           <!-- 库长了翻起来费劲 —— 模糊搜角色名或任一外貌字段,
@@ -1052,7 +1186,7 @@ function confirmClearAll(): void {
               type="search"
               class="bbi-char-search-input"
               placeholder="搜索角色名 / 外貌字段"
-              aria-label="搜索全局角色"
+              aria-label="搜索角色库"
               @keydown.esc="globalSearch = ''"
             />
             <span v-if="globalSearch" class="bbi-char-search-meta">
@@ -1068,7 +1202,7 @@ function confirmClearAll(): void {
               <Icon name="close" />
             </button>
           </div>
-          <button class="bbi-add-mini" type="button" title="添加全局角色" @click="addEntry('global')">
+          <button class="bbi-add-mini" type="button" title="添加角色" @click="addEntry()">
             <Icon name="plus" />
           </button>
         </div>
@@ -1076,17 +1210,33 @@ function confirmClearAll(): void {
         <div class="bbi-fold-wrap" :class="{ 'is-collapsed': !globalShown }">
           <div class="bbi-fold-inner">
             <p class="bbi-field-hint">
-              所有聊天生效,仅手动维护——AI 不会修改全局角色,适合玩家角色等固定形象。本聊天有同名角色时以本聊天为准。
+              所有聊天共用,只由你手动维护——AI 不会改它。适合玩家角色等固定形象,也是绑 LoRA 的唯一位置。
             </p>
+            <!-- 批量条:收藏是清理的安全边界,所以两个动作并排放在一起 -->
+            <div v-if="globalCharTagLib.entries.length" class="bbi-char-bulk">
+              <button class="bbi-btn bbi-btn-sm" type="button" title="把当前列表(搜索生效时=筛选结果)全部标为收藏" @click="favoriteVisible()">
+                <Icon name="star" />收藏当前列表
+              </button>
+              <button
+                class="bbi-btn bbi-btn-sm bbi-bulk-danger"
+                type="button"
+                :disabled="!nonFavoriteOf().length"
+                title="删除当前列表里所有未收藏角色,收藏的会保留"
+                @click="askClearNonFavorite()"
+              >
+                <Icon name="trash" />清除非收藏
+                <span class="bbi-bulk-count">{{ nonFavoriteOf().length }}</span>
+              </button>
+            </div>
             <ul v-if="filteredGlobalEntries.length" class="bbi-char-tiles">
             <li v-for="entry in filteredGlobalEntries" :key="entry.name" class="bbi-char-tile">
               <div
                 class="bbi-char-tile-box"
                 role="button"
                 tabindex="0"
-                @click="openEntry(entry, 'global')"
-                @keydown.enter.prevent="openEntry(entry, 'global')"
-                @keydown.space.prevent="openEntry(entry, 'global')"
+                @click="openEntry(entry)"
+                @keydown.enter.prevent="openEntry(entry)"
+                @keydown.space.prevent="openEntry(entry)"
               >
                 <img v-if="tileSrc(entry.name)" :src="tileSrc(entry.name)" alt="" loading="lazy" />
                 <span v-else class="bbi-char-tile-empty" :style="avatarStyle(entry.name)">{{ initialOf(entry.name) }}</span>
@@ -1102,24 +1252,25 @@ function confirmClearAll(): void {
               </div>
               <span class="bbi-char-tile-name">{{ entry.name }}</span>
               <span class="bbi-char-tile-badges">
-                <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
-                <span class="bbi-char-pill is-global">全局</span>
+                <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前;清理时不会被删">★</span>
                 <span v-if="entry.lora?.name" class="bbi-char-pill is-lora" :title="`LoRA: ${entry.lora.name}`">L</span>
               </span>
             </li>
             </ul>
             <p v-else-if="globalCharTagLib.entries.length && globalSearch" class="bbi-char-empty">
-              没有匹配「{{ globalSearch }}」的全局角色。
+              没有匹配「{{ globalSearch }}」的角色。
               <button class="bbi-btn bbi-btn-sm" type="button" @click="globalSearch = ''">清空搜索</button>
             </p>
             <p v-else class="bbi-char-empty">
-              还没有全局角色。在本聊天角色的编辑弹窗里点「提升为全局」,或点右上角「+」添加。
+              角色库还是空的。点右上角「＋」手动添加,或在下面的手机UI 角色形象里点开一个,用「添加到全局」固化过来。
             </p>
           </div>
         </div>
       </div>
   
-      <!-- ===== 本聊天角色 ===== -->
+      <!-- ===== 手机UI 角色形象(只读镜像) =====
+           角色形象只有两个地方:柏宝绘(角色库)与手机UI。这里是手机UI 那一份的只读视图,
+           要改/要收藏/要绑 LoRA 都在上面的角色库里做(点「添加到全局」把这条固化过去)。 -->
       <div class="bbi-char-section">
         <div class="bbi-char-section-head">
           <button
@@ -1128,11 +1279,11 @@ function confirmClearAll(): void {
             :class="{ 'is-static': !chatFoldable }"
             :disabled="!chatFoldable"
             :aria-expanded="chatShown"
-            :title="chatFoldable ? (chatShown ? '收起本聊天角色' : '展开本聊天角色') : ''"
+            :title="chatFoldable ? (chatShown ? '收起手机UI 角色形象' : '展开手机UI 角色形象') : ''"
             @click="toggleFold('chat')"
           >
             <Icon v-if="chatFoldable" name="chevron" class="bbi-fold-caret" :class="{ 'is-collapsed': !chatShown }" />
-            <span class="bbi-field-label">本聊天角色</span>
+            <span class="bbi-field-label">手机UI 角色形象</span>
             <span v-if="chatFoldable" class="bbi-count">{{ chatEntries.length }}</span>
           </button>
           <div v-if="chatFoldable" class="bbi-char-search">
@@ -1142,7 +1293,7 @@ function confirmClearAll(): void {
               type="search"
               class="bbi-char-search-input"
               placeholder="搜索角色名 / 外貌字段"
-              aria-label="搜索本聊天角色"
+              aria-label="搜索手机UI 角色形象"
               @keydown.esc="chatSearch = ''"
             />
             <span v-if="chatSearch" class="bbi-char-search-meta">
@@ -1158,14 +1309,32 @@ function confirmClearAll(): void {
               <Icon name="close" />
             </button>
           </div>
-          <button class="bbi-add-mini" type="button" title="添加本聊天角色" @click="addEntry('chat')">
-            <Icon name="plus" />
-          </button>
         </div>
         <div class="bbi-fold-wrap" :class="{ 'is-collapsed': !chatShown }">
           <div class="bbi-fold-inner">
             <p class="bbi-field-hint">
-              仅当前聊天生效:柏宝书角色自动建档,AI 随剧情报告永久变化;可查看历史并回滚。
+              只读镜像:外貌真源在手机UI『角色形象』。点开可以查看细节,或「添加到全局」把这条固化进上面的角色库;
+              要收藏、要绑 LoRA 也在角色库那边做。
+            </p>
+            <!-- 手机UI 影子状态条:来源/开关/跳过数/手动刷新 —— 只读镜像必须有可见的失败原因,
+                 否则「为什么少了几个人」「为什么不更新」只能靠猜 -->
+            <div
+              class="bbi-phone-status"
+              :class="{ 'is-warn': !phoneCharTagLib.enabled || !phoneCharTagLib.origin }"
+            >
+              <span class="bbi-phone-status-text">
+                <strong>手机UI</strong>
+                {{ phoneCharTagLib.entries.length }} 个 · {{ phoneCharTagLib.originLabel }}
+                <template v-if="phoneCharTagLib.skippedByGlobal">
+                  · 已跳过 {{ phoneCharTagLib.skippedByGlobal }} 个(全局库里有,以全局为准)
+                </template>
+              </span>
+              <button class="bbi-btn bbi-btn-sm" type="button" title="立刻重新读取手机UI 角色形象" @click="refreshPhoneMirror">
+                <Icon name="refresh" />刷新
+              </button>
+            </div>
+            <p v-if="!phoneCharTagLib.enabled" class="bbi-field-hint bbi-phone-off">
+              手机UI 的「角色形象」总开关是关着的:这边仍显示已缓存的形象,但手机UI 不会继续更新它们。
             </p>
             <ul v-if="filteredChatEntries.length" class="bbi-char-tiles">
             <li v-for="entry in filteredChatEntries" :key="entry.name" class="bbi-char-tile">
@@ -1173,9 +1342,9 @@ function confirmClearAll(): void {
                 class="bbi-char-tile-box"
                 role="button"
                 tabindex="0"
-                @click="openEntry(entry, 'chat')"
-                @keydown.enter.prevent="openEntry(entry, 'chat')"
-                @keydown.space.prevent="openEntry(entry, 'chat')"
+                @click="openPhoneView(entry)"
+                @keydown.enter.prevent="openPhoneView(entry)"
+                @keydown.space.prevent="openPhoneView(entry)"
               >
                 <img v-if="tileSrc(entry.name)" :src="tileSrc(entry.name)" alt="" loading="lazy" />
                 <span v-else class="bbi-char-tile-empty" :style="avatarStyle(entry.name)">{{ initialOf(entry.name) }}</span>
@@ -1191,24 +1360,17 @@ function confirmClearAll(): void {
               </div>
               <span class="bbi-char-tile-name">{{ entry.name }}</span>
               <span class="bbi-char-tile-badges">
-                <span v-if="entry.favorite" class="bbi-char-pill is-fav" title="已收藏,排在列表最前">★</span>
-                <span class="bbi-char-pill" :class="{ 'is-book': entry.source === 'book', 'is-ai': entry.source === 'ai' }">
-                  {{ sourceLabel(entry) }}
-                </span>
-                <span v-if="globalNameSet.has(entry.name)" class="bbi-char-pill is-override" title="与全局库同名,当前聊天以本条为准">覆</span>
-                <span v-if="entry.lora?.name" class="bbi-char-pill is-lora" :title="`LoRA: ${entry.lora.name}`">L</span>
-                <span v-if="entry.history.length" class="bbi-char-history-badge" :title="`${entry.history.length} 条变更记录`">
-                  <Icon name="history" />{{ entry.history.length }}
-                </span>
+                <span class="bbi-char-pill is-phone">手机UI</span>
+                <span class="bbi-char-pill is-readonly" title="只读镜像:要改、要收藏、要绑 LoRA 都复制到角色库那边做">只读</span>
               </span>
             </li>
             </ul>
             <p v-else-if="chatEntries.length && chatSearch" class="bbi-char-empty">
-              没有匹配「{{ chatSearch }}」的本聊天角色。
+              没有匹配「{{ chatSearch }}」的手机UI 角色。
               <button class="bbi-btn bbi-btn-sm" type="button" @click="chatSearch = ''">清空搜索</button>
             </p>
             <p v-else class="bbi-char-empty">
-              本聊天还没有角色。生成 tag 时柏宝书角色会自动建档,也可点右上角「+」手动补。
+              手机UI 里还没有角色形象。去手机UI 的「角色形象」生成一个,或点上面的「刷新」。
             </p>
           </div>
         </div>
@@ -1404,9 +1566,7 @@ function confirmClearAll(): void {
         <header class="bbi-modal-head">
           <span class="bbi-modal-title">
             {{ editingName ? '编辑角色' : '添加角色' }}
-            <span v-if="editingName" class="bbi-char-pill" :class="editingScope === 'global' ? 'is-global' : 'is-chat'">
-              {{ editingScope === 'global' ? '全局' : '本聊天' }}
-            </span>
+            <span v-if="editingName" class="bbi-char-pill is-global">角色库</span>
           </span>
           <button class="bbi-icon-mini" type="button" title="关闭" @click="closeEntry"><Icon name="close" /></button>
         </header>
@@ -1424,8 +1584,8 @@ function confirmClearAll(): void {
               class="bbi-btn bbi-char-fav-btn"
               :class="{ 'is-fav': draftFavorite }"
               type="button"
-              :title="draftFavorite ? '取消收藏' : '收藏后排在角色列表最前面'"
-              @click="draftFavorite = !draftFavorite"
+              :title="draftFavorite ? '取消收藏' : '收藏后排在角色列表最前面;收藏的条目不会被「清除非收藏」删掉'"
+              @click="toggleFavorite"
             >
               {{ draftFavorite ? '★ 已收藏' : '☆ 收藏' }}
             </button>
@@ -1442,32 +1602,6 @@ function confirmClearAll(): void {
             />
             <button class="bbi-btn bbi-btn-primary" type="button" @click="confirmEntry">完成</button>
           </div>
-        </div>
-
-        <!-- 作用域:仅新建时可选;已有条目换层用顶部「提升为全局 / 复制到本聊天」 -->
-        <div v-if="!editingName" class="bbi-modal-field">
-          <span class="bbi-modal-label">保存到</span>
-          <div class="bbi-segmented">
-            <button
-              class="bbi-seg"
-              :class="{ 'is-on': draftScope === 'chat' }"
-              type="button"
-              @click="draftScope = 'chat'"
-            >
-              本聊天
-            </button>
-            <button
-              class="bbi-seg"
-              :class="{ 'is-on': draftScope === 'global' }"
-              type="button"
-              @click="draftScope = 'global'"
-            >
-              全局
-            </button>
-          </div>
-          <span class="bbi-field-hint">
-            {{ draftScope === 'global' ? '全局:所有聊天生效,AI 不会修改,tag 有问题需手动改。' : '本聊天:仅当前聊天,AI 可随剧情自动变更。' }}
-          </span>
         </div>
 
         <label class="bbi-modal-field">
@@ -1618,29 +1752,6 @@ function confirmClearAll(): void {
         </div>
 
         <!-- 变更历史:仅本聊天条目;全局条目无历史(AI 不可改,手动编辑不留痕) -->
-        <div v-if="editingHistory.length" class="bbi-char-history">
-          <button class="bbi-char-history-toggle" type="button" @click="historyOpen = !historyOpen">
-            <span class="bbi-char-history-caret" :class="{ 'is-open': historyOpen }"><Icon name="chevron" /></span>
-            变更历史({{ editingHistory.length }})
-          </button>
-          <ul v-if="historyOpen" class="bbi-char-history-list">
-            <li v-for="(record, i) in [...editingHistory].reverse()" :key="i" class="bbi-char-history-item">
-              <div class="bbi-char-history-main">
-                <span class="bbi-char-history-field">{{ fieldLabel(record.field) }}</span>
-                <span class="bbi-char-history-change">
-                  <template v-if="record.from">{{ record.from }} → {{ record.to }}</template>
-                  <template v-else>{{ record.to }}</template>
-                </span>
-                <span v-if="record.reason" class="bbi-char-history-reason">{{ record.reason }}</span>
-                <span class="bbi-char-history-meta">{{ record.floor >= 0 ? `第${record.floor}楼` : '手动' }}·{{ new Date(record.at).toLocaleString() }}</span>
-              </div>
-              <button class="bbi-btn bbi-btn-sm" type="button" title="把该字段回滚到变更前的值" @click="askRollback(record)">
-                回滚
-              </button>
-            </li>
-          </ul>
-        </div>
-
         <ConfirmDialog
           v-model:open="confirmDeleteOpen"
           title="删除角色"
@@ -1651,18 +1762,6 @@ function confirmClearAll(): void {
           @confirm="confirmRemove"
         >
           确定删除「{{ editingName }}」的固定外貌 tag 吗?之后生成时该角色的外貌将不再锚定。
-        </ConfirmDialog>
-
-        <ConfirmDialog
-          v-model:open="confirmPromoteOpen"
-          title="提升为全局"
-          confirm-text="提升"
-          confirm-icon="star"
-          top-layer
-          @confirm="confirmPromote"
-        >
-          把「{{ editingName }}」的当前外貌快照进全局库?之后所有聊天(包括本聊天)都以全局值为准,
-          AI 不能再修改它;本聊天的副本与变更记录将被清除。
         </ConfirmDialog>
 
         <ConfirmDialog
@@ -1767,22 +1866,163 @@ function confirmClearAll(): void {
       </template>
     </ConfirmDialog>
 
-    <!-- ===== 回滚确认 ===== -->
+    <!-- ===== 清除非收藏确认 ===== -->
     <ConfirmDialog
-      v-model:open="confirmRollbackOpen"
-      title="回滚变更"
-      confirm-text="回滚"
+      v-model:open="confirmClearOpen"
+      title="清除非收藏 · 角色库"
+      confirm-text="清除"
+      confirm-icon="trash"
       tone="danger"
       top-layer
-      @confirm="confirmRollback"
+      @confirm="confirmClearNonFavorite"
     >
-      <template v-if="pendingRollback">
-        把「{{ pendingRollback.name }}」的「{{ fieldLabel(pendingRollback.record.field) }}」从
-        <code>{{ pendingRollback.record.to }}</code> 回滚到
-        <code>{{ pendingRollback.record.from || '(空)' }}</code> ?
-        建档记录的回滚会删除整个条目。
+      将从角色库删除 <strong>{{ clearPreview.names.length }}</strong> 个未收藏角色,
+      保留 <strong>{{ clearPreview.kept }}</strong> 个收藏角色。
+      <template v-if="clearPreview.kept === 0">
+        <br /><strong class="bbi-confirm-warn">当前没有任何收藏角色,这一下会把整个列表清空。</strong>
       </template>
+      <br />删除不可撤销;改动前的数据已随 settings.json 备份。
     </ConfirmDialog>
+
+    <!-- ===== 旧本聊天数据:直接删除确认 ===== -->
+    <ConfirmDialog
+      v-model:open="confirmPurgeLegacyOpen"
+      title="删除旧的「本聊天角色」数据"
+      confirm-text="删除"
+      confirm-icon="trash"
+      tone="danger"
+      top-layer
+      @confirm="confirmPurgeLegacy"
+    >
+      旧的「本聊天角色」数据(<strong>{{ legacyTags?.base ?? 0 }}</strong> 条手动条目
+      <template v-if="legacyTags?.floorOnly">+ <strong>{{ legacyTags?.floorOnly }}</strong> 个楼层建档名字</template>)
+      会被直接删除,不并入角色库。删除不可撤销(改动前已备份 settings.json 与聊天文件)。
+    </ConfirmDialog>
+
+    <!-- ===== 手机UI 角色形象 · 只读详情 ===== -->
+    <ModalMask :open="!!phoneViewEntry" @close="closePhoneView">
+      <div
+        v-if="phoneViewEntry"
+        class="bbi-modal bbi-phone-view-modal"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="`手机UI 角色形象:${phoneViewEntry.name}`"
+      >
+        <header class="bbi-modal-head">
+          <span class="bbi-modal-title">
+            {{ phoneViewEntry.name }}
+            <span class="bbi-char-pill is-phone">手机UI</span>
+            <span class="bbi-char-pill is-readonly" title="内容来自手机UI『角色形象』,这里一个字都改不了">只读</span>
+          </span>
+          <button class="bbi-icon-mini" type="button" title="关闭" @click="closePhoneView">
+            <Icon name="close" />
+          </button>
+        </header>
+        <!-- 行动栏:与编辑弹窗同一位置、同一样式。手机UI 的条目只读,
+             唯一能做的动作就是「添加到角色库」——收藏、绑 LoRA、改文案都在那之后做。 -->
+        <div class="bbi-char-edit-toolbar">
+          <div class="bbi-modal-foot">
+            <span class="bbi-modal-foot-spacer"></span>
+            <button
+              class="bbi-btn bbi-btn-primary"
+              type="button"
+              :disabled="phoneCopyBlocked"
+              :title="phoneCopyBlocked ? '该角色已在角色库里' : '把这条形象固化进角色库(所有聊天共用),之后可以绑 LoRA、收藏、改文案'"
+              @click="addPhoneEntryToGlobal"
+            >
+              <Icon name="star" />添加到角色库
+            </button>
+          </div>
+        </div>
+
+        <p class="bbi-field-hint">
+          只读镜像:固定外貌由手机UI『角色形象』维护,这里改不了。想改外貌就去手机UI;
+          想收藏、绑 LoRA、改文案,点上面的「添加到角色库」——那条之后归柏宝绘管,手机UI 的后续更新不再同步进来。
+        </p>
+
+        <!-- 页签与编辑弹窗同一套:外貌字段 / NSFW / LoRA。只读态不藏字段,
+             否则用户会以为「手机UI 那边没有 NSFW」或「没有 LoRA 这一档」。 -->
+        <nav class="bbi-char-tabs" aria-label="只读分组">
+          <button
+            v-for="tab in DIALOG_TABS"
+            :key="tab.key"
+            class="bbi-char-tab"
+            :class="{ 'is-on': phoneViewTab === tab.key }"
+            type="button"
+            :aria-selected="phoneViewTab === tab.key"
+            @click="phoneViewTab = tab.key"
+          >
+            {{ tab.label }}
+            <span v-if="tab.key === 'nsfw'" class="bbi-char-tab-count">{{ phoneViewNsfw.length }}</span>
+          </button>
+        </nav>
+
+        <template v-if="phoneViewTab === 'fields'">
+          <p v-if="phoneViewEmpty" class="bbi-char-empty">这条在手机UI 里还没有填任何外貌字段。</p>
+          <template v-else>
+            <div v-if="phoneViewSfw.length" class="bbi-modal-field">
+              <span class="bbi-modal-label">外貌字段</span>
+              <div class="bbi-char-form bbi-char-form--grid">
+                <div v-for="row in phoneViewSfw" :key="row.key" class="bbi-char-form-cell">
+                  <span class="bbi-char-form-label">{{ row.label }}</span>
+                  <div class="bbi-char-readonly">{{ row.value }}</div>
+                </div>
+              </div>
+            </div>
+            <div v-if="phoneViewRaw" class="bbi-modal-field">
+              <span class="bbi-modal-label">整串模式</span>
+              <div class="bbi-char-readonly bbi-char-readonly--mono">{{ phoneViewRaw }}</div>
+            </div>
+            <span class="bbi-field-hint">只写固定基础特征;服装、表情、动作不进档案,每次按剧情生成。</span>
+          </template>
+        </template>
+
+        <template v-else-if="phoneViewTab === 'nsfw'">
+          <div v-if="phoneViewNsfw.length" class="bbi-modal-field">
+            <span class="bbi-modal-label">NSFW 字段</span>
+            <div class="bbi-char-form bbi-char-form--grid">
+              <div v-for="row in phoneViewNsfw" :key="row.key" class="bbi-char-form-cell">
+                <span class="bbi-char-form-label">{{ row.label }}</span>
+                <div class="bbi-char-readonly">{{ row.value }}</div>
+              </div>
+            </div>
+          </div>
+          <p v-else class="bbi-char-empty">手机UI 里这条没有填 NSFW 字段。</p>
+        </template>
+
+        <template v-else>
+          <div class="bbi-modal-field">
+            <span class="bbi-modal-label">LoRA 挂载</span>
+            <div v-if="phoneViewEntry.lora?.name" class="bbi-char-form bbi-char-form--list">
+              <div class="bbi-char-form-row bbi-char-form-row--full">
+                <span class="bbi-char-form-label">LoRA 文件</span>
+                <div class="bbi-char-readonly bbi-char-readonly--mono">{{ phoneViewEntry.lora.name }}</div>
+              </div>
+              <div class="bbi-char-form-row bbi-char-form-row--full">
+                <span class="bbi-char-form-label">强度</span>
+                <div class="bbi-char-readonly">{{ phoneViewEntry.lora.strength }}</div>
+              </div>
+              <div class="bbi-char-form-row bbi-char-form-row--full">
+                <span class="bbi-char-form-label">触发词</span>
+                <div class="bbi-char-readonly bbi-char-readonly--mono">{{ phoneViewEntry.lora.trigger || '(空)' }}</div>
+              </div>
+            </div>
+            <p v-else class="bbi-field-hint">
+              手机UI 来的角色没有 LoRA 绑定(绑定是柏宝绘自己的配置,手机UI 不管这一项)。
+              要挂 LoRA 就点上面的「添加到角色库」——那条之后归柏宝绘管,在它的 LoRA 页签里绑定即可;
+              手机UI 出图时也会按角色名自动挂上,不用在手机UI 再配一遍。
+            </p>
+          </div>
+        </template>
+
+        <div class="bbi-char-preview">
+          <span class="bbi-field-label">最终 tag 预览</span>
+          <code class="bbi-char-preview-tag">{{ phoneViewPreview || '(空)' }}</code>
+          <span v-if="phoneViewEntry.lora?.name" class="bbi-char-preview-mode">LoRA 模式</span>
+          <span v-else-if="phoneViewRaw" class="bbi-char-preview-mode">整串模式</span>
+        </div>
+      </div>
+    </ModalMask>
 
     <!-- ===== 一键导入手机UI · 模式选择 ===== -->
     <ModalMask :open="importAllModeOpen" @close="closeImportAllMode">
@@ -1942,6 +2182,101 @@ function confirmClearAll(): void {
 .bbi-add-mini:hover {
   color: var(--bbi-accent);
   background: var(--bbi-surface-2);
+}
+
+/* —— 批量条(收藏当前列表 / 清除非收藏)——
+   放在说明文字下面、列表上面:贴着它作用的对象,又不去挤标题行那三件套。 */
+.bbi-char-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+/* 危险动作低调:平时是普通小按钮,hover 才显红(与弹窗里的删除按钮同款口径) */
+.bbi-bulk-danger:not(:disabled):hover {
+  color: var(--bbi-danger);
+  border-color: var(--bbi-danger);
+  background: var(--bbi-danger-soft);
+}
+.bbi-bulk-danger:disabled {
+  opacity: 0.5;
+}
+/* 待删条数:跟着按钮走,点之前就知道会影响多少条 */
+.bbi-bulk-count {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: var(--bbi-radius-pill);
+  background: var(--bbi-surface-2);
+  color: var(--bbi-ink-soft);
+  font-family: var(--bbi-font-mono);
+  font-size: 11px;
+  line-height: 16px;
+}
+/* 确认框里的重点警告(「没有任何收藏,会清空整个列表」) */
+.bbi-confirm-warn {
+  color: var(--bbi-danger);
+}
+
+/* —— 手机UI 影子状态条 ——
+   只读镜像必须有可见的失败原因:来源是哪一级回退、开关是否关着、有几个因全局同名被跳过。
+   正常态低调(浅底细边),异常态(读不到/开关关)换成警示色边框。 */
+.bbi-phone-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--bbi-line);
+  border-radius: var(--bbi-radius-sm);
+  background: var(--bbi-surface-2);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--bbi-ink-soft);
+}
+.bbi-phone-status.is-warn {
+  border-color: var(--bbi-danger);
+  background: var(--bbi-danger-soft);
+}
+.bbi-phone-status-text {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.bbi-phone-off {
+  margin: 0;
+  color: var(--bbi-danger);
+}
+
+/* —— 手机UI 只读详情弹窗 ——
+   与编辑弹窗共用 bbi-char-form--grid / bbi-char-tabs / bbi-char-preview(排版、字体、圆角一致),
+   但值的盒子刻意做成**非输入框**的样子:虚线边 + 浅底 + 弱化字色。看排版是同一套 UI,
+   看边框就知道「这儿改不了」——比在标题里写一句"只读"更直接。 */
+.bbi-phone-view-modal {
+  /* 与编辑弹窗同宽:两列字段在 520px 下换行太碎,长英文串几乎一行一个词 */
+  max-width: 680px;
+}
+.bbi-char-readonly {
+  min-height: 34px;
+  padding: 8px 10px;
+  border: 1px dashed var(--bbi-line-strong);
+  border-radius: var(--bbi-radius-sm);
+  background: var(--bbi-surface-2);
+  font-family: var(--bbi-font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--bbi-ink-soft);
+  word-break: break-word;
+  white-space: pre-wrap;
+  box-sizing: border-box;
+  cursor: default;
+  user-select: text;
+}
+.bbi-char-readonly--mono {
+  font-size: 12px;
+}
+/* 只读弹窗复用编辑弹窗的工具条容器(.bbi-char-edit-toolbar 已有换行与间距规则),
+   这里只补「收藏在只读态不可用」的视觉。 */
+.bbi-char-fav-btn:disabled {
+  opacity: 0.55;
 }
 
 /* —— 角色库搜索框 —— 整段窄长,塞进折叠开关与「+」按钮之间;
@@ -2220,14 +2555,21 @@ function confirmClearAll(): void {
 .bbi-char-preview {
   display: flex;
   align-items: center;
-  gap: 10px;
+  /* 长整串会把标签挤成竖排(实测手机UI 弹窗里「最终 tag 预览」竖着叠下来),
+     所以允许换行、并让标签不收缩 */
+  flex-wrap: wrap;
+  gap: 6px 10px;
   padding: 8px 12px;
   border: 1px solid var(--bbi-line);
   border-radius: var(--bbi-radius-sm);
   background: var(--bbi-surface-2);
 }
+.bbi-char-preview > .bbi-field-label {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 .bbi-char-preview-tag {
-  flex: 1 1 auto;
+  flex: 1 1 220px;
   min-width: 0;
   font-family: var(--bbi-font-mono);
   font-size: 12px;

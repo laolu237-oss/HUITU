@@ -73,25 +73,29 @@ for (const character of list.characters) {
       name: "阿黛尔",
       // 可直接拿去出图的完整 tag 串 —— 推荐直接用这个
       tag: "1girl, short silver hair, blue eyes, pale skin, slender, scar on left eyebrow, black coat",
-      // 分字段版本（要自己挑着用时才需要）
+      // 分字段版本（要自己挑着用时才需要）：11 个外貌字段，
+      // characterTraits / facialFeatures / facialFeaturesBack /
+      // upperBodySFW / upperBodySFWBack / fullBodySFW / fullBodySFWBack /
+      // upperBodyNSFW / upperBodyNSFWBack / fullBodyNSFW / fullBodyNSFWBack
       fields: {
-        fandom: "",     // 同人身份
-        sex: "1girl",
-        hair: "short silver hair",
-        eyes: "blue eyes",
-        skin: "pale skin",
-        body: "slender",
-        extra: "scar on left eyebrow",  // 标志特征
-        outfit: "black coat",
+        characterTraits: "22yo, chinese girl, elegant",
+        facialFeatures: "short silver hair, blue eyes",
+        // …其余同构
       },
       nl: "a girl with short silver hair",  // 自然语言外貌（可空）
-      source: "ai",        // 'manual' 用户手写 | 'ai' AI 在剧情里建的档 | 'book' 从柏宝书同步
-      scope: "chat",       // 'chat' 本聊天档案 | 'global' 全局角色库（跨聊天）
+      source: "manual",    // 'manual' 用户手写 | 'ai' AI 建的旧档 | 'book' 从柏宝书同步的旧档 | 'phone' 来自手机UI镜像
+      scope: "global",     // 'global' 角色库（所有聊天共用） | 'phone' 手机UI角色形象（只读镜像，按聊天）
+                           // | 'chat' 历史值：旧的「本聊天层」已下线，正常不再返回
       desc: "银色短发",     // 建档时那句「为什么长这样」（多为空串）
     },
   ],
 }
 ```
+
+> **两条现状（2026-10 起）**
+> - 角色档案只剩**角色库**一层（外加手机UI 的只读镜像）；旧的按聊天那一层已下线。
+> - 柏宝绘**不再自动建档、也不写 changes**：外貌真源在手机UI『角色形象』，
+>   库里没有的角色由出图请求现场描写，不会回写到库。所以同一角色在不同聊天里可能给出不同的 `tag`。
 
 `tag` 是按固定顺序（同人身份→性别→头发→眼睛→肤色→体型→标志特征→着装）拼好的，与柏宝绘自己出图用的串**完全一致**。不建议自己从 `fields` 拼——老条目可能只有整串原文，那条回落逻辑在 `tag` 里已经处理过了。
 

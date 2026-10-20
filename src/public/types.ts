@@ -50,16 +50,18 @@ export interface PublicCharacter {
   /**
    * 这条档案从哪来:
    * - 'manual' 用户手写 / 手动编辑过
-   * - 'ai'     AI 在剧情里建的档或改过
-   * - 'book'   从柏宝书的角色记忆同步来
+   * - 'ai'     AI 在剧情里建的档或改过(2026-10-20 起不再新建)
+   * - 'book'   从柏宝书的角色记忆同步来(历史数据)
+   * - 'phone'  手机UI『角色形象』的只读镜像(2026-10-20 起的外貌真源)
    */
-  source: 'book' | 'manual' | 'ai';
+  source: 'book' | 'manual' | 'ai' | 'phone';
   /**
    * 作用域:
-   * - 'global' 全局角色库(跨聊天,只由用户手动维护,AI 改不动)
-   * - 'chat'   本聊天的档案(手动基线 + AI 在楼层里的变更重放而来)
+   * - 'global' 角色库(所有聊天共用,只由用户手动维护,AI 改不动)
+   * - 'phone'  手机UI『角色形象』的只读镜像(2026-10-20 起;按聊天,不进柏宝绘存储)
+   * - 'chat'   历史值:旧的「本聊天层」已下线,正常不会再返回
    */
-  scope: 'global' | 'chat';
+  scope: 'global' | 'chat' | 'phone';
   /** 建档时那句「为什么长这样」(多为空串)。 */
   desc: string;
 }

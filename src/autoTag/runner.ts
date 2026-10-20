@@ -12,20 +12,11 @@ import { autoTagProfile, buildAutoTagMessages, buildLibraryCorpus } from '@/auto
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
 import { buildSlotTaskNote } from '@/autoTag/slotPlan';
 import { closetLib } from '@/state/closet';
+import { refreshPhoneCharTags } from '@/state/phoneCharTags';
 import {
-  BBI_CHAR_EXTRA_KEY,
-  CHAR_TAG_FIELDS,
   charTagsBeforeFloor,
-  createCharTagNewOp,
-  createCharTagSetOp,
-  emptyCharFields,
   lockedCharTagNames,
-  makeCharTagFloorDelta,
-  readCharTagFloorDelta,
-  recomputeCharTags,
-  type CharTagAutoOp,
   type CharTagEntry,
-  type CharTagField,
 } from '@/state/charTags';
 import { ensureVerbatimItems, stripCharacterNameTags, type VerbatimSource } from '@/characterLora';
 import { injectImageTags, parseImagePlan, type ImagePlan } from '@/autoTag/protocol';
@@ -146,49 +137,12 @@ function describeRebase(report: RebaseReport): string {
   return parts.join(' · ');
 }
 
-/** 把 AI 报告的 changes 转成当前楼层操作;真正写回在正文 CAS 成功时一次完成。 */
-function planChangeOps(plan: ImagePlan): PositionedCharOp[] {
-  const ops: PositionedCharOp[] = [];
-  for (const change of plan.changes) {
-    let op: CharTagAutoOp | null = null;
-    if (change.field === 'new') {
-      // value 可能是结构化字段的 JSON 串(protocol.ts 拼),也可能是整串 tag 文本
-      let fields: Partial<Record<CharTagField, string>> | null = null;
-      let value = '';
-      if (change.value.startsWith('{')) {
-        try {
-          const parsed = JSON.parse(change.value) as Record<string, unknown>;
-          const picked: Partial<Record<CharTagField, string>> = {};
-          for (const field of CHAR_TAG_FIELDS) {
-            const value = parsed[field];
-            if (typeof value === 'string' && value.trim()) picked[field] = value.trim();
-          }
-          if (Object.keys(picked).length) fields = picked;
-        } catch {
-          /* 非 JSON → 当整串处理 */
-        }
-      }
-      if (!fields && change.value) value = change.value;
-      op = createCharTagNewOp(
-        {
-          name: change.name,
-          fields: { ...emptyCharFields(), ...(fields ?? {}) },
-          raw: value,
-          nl: change.nl ?? '',
-          source: 'ai',
-          desc: '',
-        },
-        change.reason,
-      );
-    } else if (change.field === 'nl') {
-      op = createCharTagSetOp(change.name, 'nl', change.value || change.nl || '', change.reason);
-    } else {
-      op = createCharTagSetOp(change.name, change.field, change.value, change.reason);
-    }
-    if (op) ops.push({ op, sourceLine: change.sourceLine });
-  }
-  return ops.sort((left, right) => left.sourceLine - right.sourceLine);
-}
+/*
+ * [2026-10-20] 这里原本是 `planChangeOps`:把 AI 输出的 changes 转成楼层操作再写回角色库。
+ * 现已整体下线 —— 角色外貌真源在手机UI『角色形象』,柏宝绘只读镜像;模型再写库就是造第二个真源。
+ * 协议端(protocol.ts)对 changes 仍然宽容解析(旧数据/自定义预设可能带),但**谁读都不再落库**,
+ * 所以这里连转换函数都不需要了。历史楼层的旧 delta 仍在,重放逻辑见 state/charTags.deriveCharTags。
+ */
 
 async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> {
   const context = getContext();
@@ -310,13 +264,16 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
   running.set(runKey, controller);
 
   try {
+    // 生成前把手机UI 角色形象现读一次:轮询只在角色管理页开着时跑,用户直接出图时
+    // 手机UI 可能刚生成了新角色。指纹短路,没变就是一次廉价比较,不会白重放。
+    refreshPhoneCharTags();
     const memory = readBookMemory(floor, context.chat[floor]?.mes ?? '', context.name1);
     // 单槽重写:库文本要包含本楼已落档的增量(首次全量分析建的档),否则 AI 会把
     // 已建档角色当新人重写。charTagsBeforeFloor(floor + 1) 正好含本楼(swipe 匹配时生效)。
     const entriesBefore = slot ? charTagsBeforeFloor(floor + 1) : charTagsBeforeFloor(floor);
-    // 锁定名(全局库 ⊖ 本聊天基线):AI 的 changes 对这些名字一律无效,库文本里带 [locked] 标记
+    // 锁定名(全局库 + 手机UI 影子 ⊖ 本聊天基线):库文本里带 [locked] 标记,AI 只能照抄
     const lockedNames = lockedCharTagNames();
-    // 纯本地渲染:建档由主请求在同一次输出里完成(changes 的 field="new")。
+    // 纯本地渲染:changes 已下线,建档不再由主请求完成(外貌真源在手机UI)。
     // 相关性筛选(libraryFilter='relevant'):只把本楼相关角色按完整字段下发,其余压成名单。
     // 语料 = 目标正文 + 携带上下文 + 柏宝书记忆;玩家与主角色无条件保留全量——
     // 剧情常用「你」指代主角,名字根本不出现,只靠扫描会漏掉他。
@@ -370,23 +327,14 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         // (直接 let 会被 TS 收窄成 null:闭包内的赋值控制流分析看不见。)
         const parsed: { plan: ImagePlan | null } = { plan: null };
         const validate = (raw: string) => {
-          const candidate = parseImagePlan(
+          // changes 已下线:旧版这里还要验「NAI 建档必须带 nl」,现无建档概念,不再校验——
+          // 为一份会被丢弃的 changes 消耗重试次数纯属浪费。
+          parsed.plan = parseImagePlan(
             raw,
             preparedTarget.segments,
             promptOptions.minImages,
             promptOptions.maxImages,
           );
-          // 单槽重写忽略本次 changes,不校验建档 nl —— 校验它会为一份会被丢弃的
-          // changes 白白消耗重试次数。NAI 关了自然语言时协议不要 nl,也就不验。
-          if (
-            !slot &&
-            profile.naiCharPrompts &&
-            profile.nl &&
-            candidate.changes.some(change => change.field === 'new' && !change.nl?.trim())
-          ) {
-            throw new Error('NAI 4.5/V5 建档必须附带 nl 外貌描述');
-          }
-          parsed.plan = candidate;
         };
         // 有重试时给 source 带上第几次,历史里两条记录一眼看出是重试关系
         const source = slot
@@ -438,16 +386,10 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       if (existingNames.length) plan.images[0].names = existingNames;
     }
 
-    // 单槽重写不落 changes:首次全量分析已为整楼建过档,这里再应用一次只会产生
-    // 重复的建档/变更记录;库文本已含本楼增量(见上面 entriesBefore),AI 照抄即可。
-    const planOps = slot ? [] : planChangeOps(plan);
-    // 锁定角色(全局库)不接受 AI changes:丢弃,不写入楼层、不参与 @替换。
-    // 重放侧 applyCharTagOps 也会按锁定名再拦一次(旧消息里可能已存这类 ops)。
-    const effectiveOps = lockedNames.size
-      ? planOps.filter(item => !lockedNames.has(item.op.name))
-      : planOps;
-    const floorOps = effectiveOps.map(item => item.op);
-    const previousDelta = readCharTagFloorDelta(message);
+    // [2026-10-20] changes 整体下线:AI 输出里的 changes 一律忽略(不转 op、不写楼层 extra、
+    // 不改角色库)。@占位符替换只按**库当前状态**做,不再按本楼变化做位置门控——
+    // 没有变化了,位置门控自然失去意义。历史楼层里已存的旧 delta 仍由重放逻辑生效。
+    const effectiveOps: PositionedCharOp[] = [];
 
     // @占位符按正文位置替换：变化前图片用旧档，变化位置及之后用新档。
     const unknownNames = new Set<string>();
@@ -545,8 +487,9 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       toastr.info('模型没有给出新的提示词，本张保持原样', '柏宝绘');
       return;
     }
-    // 没有图片、没有角色变化、也没有旧楼层变化要清理时,保持原来的无写入早退。
-    if (!plan.images.length && !floorOps.length && !previousDelta) {
+    // 没有图片就不再写正文。旧楼层的历史 delta 不归本轮管(重放侧照旧生效),
+    // changes 下线后这里也没有「要清理的变化」需要收尾。
+    if (!plan.images.length) {
       if (opts.manual) toastr.info('模型认为本楼没有值得插图的画面', '柏宝绘');
       else console.debug(`[柏宝绘] 第 ${floor} 楼无需插图`);
       return;
@@ -598,20 +541,13 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       chatId,
       swipeId,
       message,
-      // 单槽不写法:本楼角色增量与其它槽位图片都不归它管,不传 extraUpdate 即保持原样。
-      slot
-        ? undefined
-        : {
-            key: BBI_CHAR_EXTRA_KEY,
-            value: makeCharTagFloorDelta(floorOps, swipeId ?? 0),
-          },
+      // changes 下线后本楼不再写角色 extra(旧 delta 保持原样,不覆盖也不清理)。
     );
     if (result === 'saved') {
       if (slot) {
         toastr.success(`已重写第 ${slot.seq + 1} 张的提示词，正在按新提示词出图`, '柏宝绘');
         return;
       }
-      recomputeCharTags();
       if (rebaseNote) console.info(`[柏宝绘] 第 ${floor} 楼 tag 位置重定位:${rebaseNote}`);
       if (plan.images.length) {
         toastr.success(`已在第 ${floor} 楼插入 ${plan.images.length} 个生图 tag`, '柏宝绘');

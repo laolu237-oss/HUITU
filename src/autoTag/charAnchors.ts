@@ -155,7 +155,7 @@ export function buildLibraryText(
 ): string {
   if (!entries.length) return '';
   const lockedNote = lockedNames?.size
-    ? '; entries marked [locked] are global and immutable: never report changes for them, always copy their fields as-is'
+    ? '; entries marked [locked] belong to the global library or the phone-UI appearance cache and are immutable for you: always copy their fields as-is, never rewrite them'
     : '';
   // [lora] 条目的冒号后是**完整 LoRA 提示词串**(触发词 + 外貌 tag):外貌字段不再下发,
   // 该串必须整段进入画面提示词(插件会做完整性补齐,模型不要自行改写)。
@@ -179,7 +179,7 @@ export function buildLibraryText(
   );
   if (roster.length) {
     sections.push(
-      '## 其余已建档（本楼未出现；仅用于判断「是否已建档」，不要为其输出 changes，也不要凭名字猜字段）',
+      '## 其余已建档（本楼未出现；只用于判断「库里已有谁」，不要凭名字猜字段）',
     );
     sections.push(formatRosterLine(roster, lockedNames));
   }

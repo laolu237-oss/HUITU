@@ -59,7 +59,11 @@ export const CHAR_TAG_FIELD_LABELS: Record<CharTagField, string> = {
   fullBodyNSFWBack: '下身NSFW(背)',
 };
 
-export type CharTagSource = 'book' | 'manual' | 'ai';
+/**
+ * 条目来源。
+ * - 'phone' 手机UI『角色形象』的只读影子(2026-10-20 起外貌外部真源):不落盘、不进 history。
+ */
+export type CharTagSource = 'book' | 'manual' | 'ai' | 'phone';
 export type CharTagHistoryField = CharTagField | 'new' | 'raw' | 'nl';
 
 export interface CharTagChangeRecord {
@@ -159,6 +163,24 @@ export function setGlobalCharTagSource(provider: () => CharTagEntry[]): void {
 }
 
 /**
+ * 手机UI『角色形象』影子库的条目来源,由 phoneCharTags.ts 启动时注入。
+ *
+ * 与全局库同款注入:影子层只读、内容由手机UI 决定,这里的 normalize/CRUD 它一样要用,
+ * 直接互转会成模块环。排序上影子在全局之后——**全局是用户手动固定的,优先于手机UI**。
+ */
+let phoneCharTagSource: () => CharTagEntry[] = () => [];
+
+export function setPhoneCharTagSource(provider: () => CharTagEntry[]): void {
+  phoneCharTagSource = provider;
+}
+
+/** 外部(全局 + 手机UI 影子)条目的合订视图:派生种子与锁定名集都用它。 */
+function externalCharTagEntries(): CharTagEntry[] {
+  const phone = phoneCharTagSource();
+  return phone.length ? [...globalCharTagSource(), ...phone] : globalCharTagSource();
+}
+
+/**
  * 派生种子 = 本聊天基线 + 全局库补同名空缺(本聊天同名条目优先,即「本聊天覆盖全局」)。
  */
 export function mergeCharTagSeed(
@@ -186,13 +208,12 @@ export function computeLockedCharTagNames(
   );
 }
 
-function mergedSeedEntries(): CharTagEntry[] {
-  return mergeCharTagSeed(baseEntries, globalCharTagSource());
-}
-
-/** 当前生效的锁定名集(全局 ⊖ 本聊天基线)。 */
+/**
+ * 当前生效的锁定名集:库里的全部条目都是外部真源(全局 / 手机UI),AI 一律不改。
+ * 本聊天层下线后不再有「本聊天覆盖」这条例外。
+ */
 export function lockedCharTagNames(): ReadonlySet<string> {
-  return computeLockedCharTagNames(baseEntries, globalCharTagSource());
+  return new Set(externalCharTagEntries().map(entry => entry.name));
 }
 
 export function emptyCharFields(): Record<CharTagField, string> {
@@ -304,7 +325,10 @@ function normalizeEntry(raw: unknown): CharTagEntry | null {
     fields,
     raw: rawTag,
     nl: typeof value.nl === 'string' ? value.nl.trim() : '',
-    source: value.source === 'book' || value.source === 'ai' ? value.source : 'manual',
+    source:
+      value.source === 'book' || value.source === 'ai' || value.source === 'phone'
+        ? value.source
+        : 'manual',
     desc: typeof value.desc === 'string' ? value.desc : '',
     history: normalizeHistory(value.history),
     lora,
@@ -498,9 +522,19 @@ export function deriveCharTags(
   return entries;
 }
 
-export function charTagsBeforeFloor(floor: number): CharTagEntry[] {
-  const chat = getContext()?.chat ?? [];
-  return deriveCharTags(mergedSeedEntries(), chat, floor, lockedCharTagNames());
+/**
+ * [2026-10-20] 本聊天层下线:柏宝绘的角色库只有「全局」这一层。
+ *
+ * 背景:角色形象只有两个地方 —— 柏宝绘(库)和手机UI(角色形象)。再按聊天分一层,
+ * 用户会遇到「同一个角色三份档案、改哪份生效看运气」的问题,而且手机UI 出图只读柏宝绘库,
+ * 本聊天层的档案它根本看不见。
+ *
+ * 所以派生库 = 全局 + 手机UI 影子,**不读**本聊天基线与楼层 delta。
+ * 旧数据仍留在聊天文件里,由 `state/charMigration.ts` 提供一次性「并入全局 / 清空」,
+ * 这里刻意不读它们 —— 否则会出现「界面上看不见、AI 却照抄」的幽灵档案。
+ */
+export function charTagsBeforeFloor(_floor: number): CharTagEntry[] {
+  return externalCharTagEntries().map(cloneEntry);
 }
 
 export function makeCharTagFloorDelta(ops: CharTagAutoOp[], swipe: number): CharTagFloorDelta | undefined {
@@ -508,15 +542,13 @@ export function makeCharTagFloorDelta(ops: CharTagAutoOp[], swipe: number): Char
 }
 
 export function recomputeCharTags(): void {
-  const chat = getContext()?.chat ?? [];
-  charTagLib.entries = deriveCharTags(mergedSeedEntries(), chat, chat.length, lockedCharTagNames());
+  charTagLib.entries = externalCharTagEntries().map(cloneEntry);
   charTagBaseNames.clear();
-  for (const entry of baseEntries) charTagBaseNames.add(entry.name);
 }
 
 export function hydrateCharTags(): void {
   const raw = getContext()?.chatMetadata?.[META_KEY];
-  // v2 的整库快照无法可靠反推来源楼层,迁移时作为基线保留,避免丢用户现有数据。
+  // 本聊天层已不参与派生,这里读它只为「旧数据迁移/清理」有据可依(见 charMigration.ts)。
   baseEntries = normalizeCharTagStore(raw);
   recomputeCharTags();
 }
@@ -580,99 +612,57 @@ export function findCharTag(name: string): CharTagEntry | undefined {
   return charTagLib.entries.find(entry => entry.name === name);
 }
 
-export interface UpsertOptions {
-  recordChanges?: boolean;
+/* 本聊天层的 CRUD(upsertCharTag / removeCharTag / removeCharTagsByNames /
+ * setCharTagsFavoriteByNames / rollbackCharTag)已随该层下线删除:
+ * 角色库只由 state/globalCharTags 维护,手机UI 影子只读。 */
+
+/* ============ 旧「本聊天层」(已下线,只留给迁移/清理) ============
+
+/** 旧本聊天库的 chatMetadata 键名(迁移/清空时外部模块要用)。 */
+export const CHAR_TAG_META_KEY = META_KEY;
+
+/** 读旧本聊天基线。与派生库无关,仅供迁移/清理统计。 */
+export function readChatCharTagBase(): CharTagEntry[] {
+  return baseEntries.map(cloneEntry);
 }
 
-export function upsertCharTag(
-  entry: CharTagEntry,
-  oldName?: string,
-  opts: UpsertOptions = {},
-): boolean {
-  const name = entry.name.trim();
-  // LoRA 模式下没有外貌字段/整串是合法的:外貌由 LoRA 决定
-  if (!name || (!buildEntryTag(entry) && !entry.lora?.name)) return false;
-  const previous = findCharTag(oldName ?? name);
-  const next: CharTagEntry = {
-    name,
-    fields: normalizeFields(entry.fields),
-    raw: entry.raw.trim(),
-    nl: entry.nl.trim(),
-    source: entry.source,
-    desc: entry.desc,
-    history: entry.history.length
-      ? entry.history.map(record => ({ ...record }))
-      : (previous?.history.map(record => ({ ...record })) ?? []),
-    // LoRA 绑定只由角色管理页维护:这里以入参为准(不传 = 解绑)。
-    // 内部调用方(回滚/提升全局/复制回本聊天)都是基于现有条目展开,会自带 lora。
-    lora: entry.lora ? { ...entry.lora } : undefined,
-    ...(entry.favorite === true ? { favorite: true } : {}),
+/** 扫当前聊天所有楼层(含 swipe)里 ops 涉及的名字 —— 统计「还有多少旧档案只靠楼层撑着」。 */
+export function listChatCharTagFloorNames(): string[] {
+  const context = getContext();
+  const names = new Set<string>();
+  if (!context?.chat) return [];
+  const collect = (extra: Record<string, unknown> | undefined) => {
+    if (!extra) return;
+    const raw = extra[BBI_CHAR_EXTRA_KEY];
+    if (!raw || typeof raw !== 'object') return;
+    const value = raw as Partial<CharTagFloorDelta>;
+    if (value.v !== 1 || !Array.isArray(value.ops)) return;
+    for (const op of value.ops) {
+      const normalized = normalizeAutoOp(op);
+      if (normalized?.name) names.add(normalized.name);
+    }
   };
-  if (opts.recordChanges && previous) {
-    const at = Date.now();
-    for (const field of CHAR_TAG_FIELDS) {
-      if (previous.fields[field] !== next.fields[field]) {
-        pushHistory(next, {
-          field,
-          from: previous.fields[field],
-          to: next.fields[field],
-          reason: '手动编辑',
-          floor: -1,
-          at,
-        });
-      }
-    }
-    if (previous.raw !== next.raw && (previous.raw || next.raw)) {
-      pushHistory(next, { field: 'raw', from: previous.raw, to: next.raw, reason: '手动编辑', floor: -1, at });
-    }
-    if (previous.nl !== next.nl && (previous.nl || next.nl)) {
-      pushHistory(next, { field: 'nl', from: previous.nl, to: next.nl, reason: '手动编辑', floor: -1, at });
-    }
+  for (const message of context.chat) {
+    collect(message.extra);
+    for (const swipeInfo of message.swipe_info ?? []) collect(swipeInfo?.extra);
   }
-
-  detachFromExistingFloors(oldName, name);
-  if (oldName && oldName !== name) {
-    const oldIndex = baseEntries.findIndex(candidate => candidate.name === oldName);
-    if (oldIndex >= 0) baseEntries.splice(oldIndex, 1);
-  }
-  const index = baseEntries.findIndex(candidate => candidate.name === name);
-  if (index >= 0) baseEntries[index] = next;
-  else baseEntries.push(next);
-  persistBase();
-  recomputeCharTags();
-  return true;
+  return [...names];
 }
 
-export function removeCharTag(name: string): boolean {
-  const cleanName = name.trim();
-  if (!cleanName || !findCharTag(cleanName)) return false;
-  detachFromExistingFloors(cleanName);
-  const index = baseEntries.findIndex(entry => entry.name === cleanName);
-  if (index >= 0) baseEntries.splice(index, 1);
-  persistBase();
+/**
+ * 清空旧本聊天层:删 chatMetadata 键 + 剥掉所有楼层 ops。
+ * 迁移(先并入全局)与直接清理都以此收尾 —— 数据要么已经搬走,要么用户确认不要了。
+ */
+export function clearChatCharTagBase(): void {
+  const floorNames = listChatCharTagFloorNames();
+  baseEntries = [];
+  const context = getContext();
+  if (context?.chatMetadata) {
+    delete context.chatMetadata[META_KEY];
+    context.saveMetadataDebounced?.();
+  }
+  detachFromExistingFloors(...floorNames);
   recomputeCharTags();
-  return true;
-}
-
-export function rollbackCharTag(name: string, record: CharTagChangeRecord): boolean {
-  const current = findCharTag(name);
-  if (!current) return false;
-  if (record.field === 'new') return removeCharTag(name);
-  const next = cloneEntry(current);
-  if (record.field === 'raw') next.raw = record.from;
-  else if (record.field === 'nl') next.nl = record.from;
-  else next.fields[record.field] = record.from;
-  next.source = 'manual';
-  next.desc = '';
-  pushHistory(next, {
-    field: record.field,
-    from: record.to,
-    to: record.from,
-    reason: '手动回滚',
-    floor: -1,
-    at: Date.now(),
-  });
-  return upsertCharTag(next, name);
 }
 
 let bound = false;

@@ -111,12 +111,14 @@ describe('getCharacters', () => {
     expect('history' in getCharacters().characters[0]).toBe(false);
   });
 
-  it('marks global-library-only entries as global scope', () => {
+  it('marks role-library entries as global, others fall back to chat/phone', () => {
     const global = entry({ name: '全局角色' });
     setGlobalCharTagSource(() => [global]);
     charTagLib.entries = [entry(), global];
 
     const byName = Object.fromEntries(getCharacters().characters.map(c => [c.name, c.scope]));
+    // [2026-10-20] scope 改为按「条目实际来自哪儿」判定:角色库里的是 global,
+    // 手机UI 影子是 phone;测试里没挂影子条目 → 落到历史值 chat
     expect(byName).toEqual({ 阿黛尔: 'chat', 全局角色: 'global' });
   });
 

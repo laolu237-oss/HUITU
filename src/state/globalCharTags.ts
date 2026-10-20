@@ -1,21 +1,18 @@
 import { getContext } from '@/st/context';
 import { reactive } from 'vue';
 import {
-  findCharTag,
   normalizeCharTagStore,
   recomputeCharTags,
-  removeCharTag,
   setGlobalCharTagSource,
-  upsertCharTag,
   type CharTagEntry,
 } from '@/state/charTags';
 
 /**
- * 全局角色固定外貌库 —— 跨所有聊天生效的「只读模板」。
+ * 角色库(跨所有聊天) —— 柏宝绘唯一的可写角色档案层。
  *
- * 定位:玩家角色等「哪个聊天都用同一张脸」的角色,建档一次、处处生效。
- * 硬约束:**AI 永远不能写它**(charTags.applyCharTagOps 按锁定名丢弃 changes),
- * 只有用户手动增删改、或把本聊天角色「提升为全局」会写。tag 有问题用户自己改。
+ * [2026-10-20] 本聊天层已下线:角色形象只有两个地方 —— 柏宝绘(本库)与手机UI(只读镜像)。
+ * 硬约束:**AI 永远不写它**;只有用户在角色管理页手动增删改、或从手机UI 影子
+ * 「添加到角色库」会写。tag 有问题用户自己改。
  *
  * 存储:extensionSettings[GLOBAL_KEY](→ 服务器 settings.json,跨设备同步),
  * 带 revision + 广播事件,协议与 settings.ts 的共享渠道/排除名单同构。
@@ -152,28 +149,51 @@ export function removeGlobalCharTag(name: string): boolean {
 }
 
 /**
- * 把本聊天角色的**当前生效值**(含本聊天 AI 已改出的结果)快照进全局库,
- * 并删除本聊天副本、清掉该角色在本聊天的楼层 ops —— 之后由全局库接管,
- * 任何聊天(包括本聊天)都以全局值为准,AI 的 changes 对该名字一律无效。
+ * 批量删除全局条目,**一次**落盘 + 一次重算。
+ *
+ * 与 removeGlobalCharTag 同口径,只是不逐条写盘:全局库动辄几十条(从手机UI 导入过一次
+ * 就是几十),循环调用等于几十次 extensionSettings 序列化 + saveSettingsDebounced,
+ * 还会连带几十次 recomputeCharTags(整段楼层重放)。
+ * @returns 实际删除的条数。
  */
-export function promoteCharTagToGlobal(name: string): boolean {
-  const current = findCharTag(name);
-  if (!current) return false;
-  if (!upsertGlobalCharTag({ ...current, fields: { ...current.fields }, history: [] })) return false;
-  removeCharTag(name);
-  return true;
+export function removeGlobalCharTagsByNames(names: readonly string[]): number {
+  const wanted = new Set(names.map(name => name.trim()).filter(Boolean));
+  if (!wanted.size) return 0;
+  const before = globalCharTagLib.entries.length;
+  globalCharTagLib.entries = globalCharTagLib.entries.filter(entry => !wanted.has(entry.name));
+  const removed = before - globalCharTagLib.entries.length;
+  if (removed > 0) {
+    persist();
+    recomputeCharTags();
+  }
+  return removed;
 }
 
 /**
- * 反向出口:把全局条目复制成本聊天副本。之后本聊天以副本为准(覆盖全局),
- * 该名字移出锁定集,AI 在本聊天可照常对它变更;其他聊天不受影响。
+ * 批量收藏/取消收藏全局条目。全局条目本来就整条存在 extensionSettings 里,不需要像本聊天
+ * 那样先「沉进基线」;一次落盘 + 一次重算即可。
+ * @returns 收藏状态真正发生变化的条数。
  */
-export function copyGlobalCharTagToChat(name: string): boolean {
-  const global = findGlobalCharTag(name);
-  if (!global) return false;
-  return upsertCharTag(
-    { ...global, fields: { ...global.fields }, history: [] },
-    undefined,
-    { recordChanges: false },
-  );
+export function setGlobalCharTagsFavoriteByNames(
+  names: readonly string[],
+  favorite: boolean,
+): number {
+  const wanted = new Set(names.map(name => name.trim()).filter(Boolean));
+  if (!wanted.size) return 0;
+  let changed = 0;
+  for (const entry of globalCharTagLib.entries) {
+    if (!wanted.has(entry.name)) continue;
+    if ((entry.favorite === true) === favorite) continue;
+    if (favorite) entry.favorite = true;
+    else delete entry.favorite;
+    changed += 1;
+  }
+  if (changed > 0) {
+    persist();
+    recomputeCharTags();
+  }
+  return changed;
 }
+
+/* 「提升为全局 / 复制到本聊天」两条层间迁移随本聊天层下线删除:
+ * 现在只有一层(角色库),手机UI 的角色通过「添加到角色库」进来。 */

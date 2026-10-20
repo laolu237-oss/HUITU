@@ -84,7 +84,9 @@ describe('formatEntryForPrompt / buildLibraryText', () => {
     );
     expect(text).toContain('- 小雪 [locked]: 角色特征=1girl');
     expect(text).toContain('- 张三: 角色特征=1boy');
-    expect(text).toContain('[locked] are global and immutable');
+    // [2026-10-20] changes 下线后,锁定条目的说明不再提「不要报 changes」,只声明不可改写
+    expect(text).toContain('belong to the global library or the phone-UI appearance cache');
+    expect(text).not.toContain('never report changes');
     // 无锁定名时头部保持原样(不带锁定说明)
     expect(buildLibraryText([entry('小雪', { characterTraits: '1girl' })])).not.toContain('immutable');
   });
