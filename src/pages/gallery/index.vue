@@ -71,11 +71,20 @@ const partialFailed = ref(0);
 const query = ref('');
 
 /**
+ * 每次进图库/点刷新换一个版本串。
+ *
+ * 图库里的文件名可能不变(角色头像就是固定名字覆盖写),URL 一样时浏览器直接吃缓存,
+ * 于是「重新生成的头像」在图库里还是旧那张,看起来像没存进来。
+ */
+const loadVersion = ref(0);
+
+/**
  * 静态路由 /user/images/* 服务端做 decodeURIComponent(users.js createRouteHandler),
  * 故逐段编码:中文名浏览器本会自动编码,但角色名里的 # ? 不编码会被当成 URL 片段/查询。
  */
 function imageSrc(folder: string, file: string): string {
-  return `/user/images/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`;
+  const base = `/user/images/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`;
+  return loadVersion.value ? `${base}?v=${loadVersion.value}` : base;
 }
 
 /** 从 bbi_<nameHash>_<swipe>_<promptHash>-<genId>.<ext> 里取 genId,取不到则回退原文件名。 */
@@ -158,6 +167,8 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = '';
   partialFailed.value = 0;
+  // 换一个版本串:同名覆盖的文件(角色头像)才能显示成新图,而不是浏览器缓存里的旧图
+  loadVersion.value = Date.now();
   // 刷新时重扫当前聊天:期间可能又生成了几张图,也可能切了聊天
   seedPromptsFromChat();
   try {

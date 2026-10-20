@@ -18,9 +18,9 @@
 | 项 | 值 |
 | --- | --- |
 | 插件 | 柏宝绘（HUITU） |
-| 版本 | **v0.3.30**（2026-10-20 起） |
-| 分支 | `feat/character-lora`（未合并 main、未 push） |
-| 测试基线 | `npx vitest run` → **922 passed / 3 skipped / 0 failed** |
+| 版本 | **v0.3.35**（2026-10-20 起） |
+| 分支 | `main`（已合并并推送；`feat/character-lora` 与 main 同一提交） |
+| 测试基线 | `npx vitest run` → **921 passed / 3 skipped / 0 failed** |
 | 构建 | `npm run build` 通过；`dist/` 已更新，**必须随源码一起提交** |
 | 文档 | `文生图转换说明书/` —— **说明书唯一维护点**，改说明书只改这里，别处不留副本；`docs/presets/` —— 预设样例与生成脚本（开发用，不随说明书外发） |
 

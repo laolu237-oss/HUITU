@@ -373,8 +373,18 @@ function initialOf(name: string): string {
   return /^[a-z]/i.test(trimmed) ? trimmed[0].toUpperCase() : trimmed[0];
 }
 
+/**
+ * 图片 URL 的版本号:**每成功生成一次 +1**。
+ *
+ * 头像的文件名是固定的 `avatar.*`(同名覆盖),所以重新生成后 URL 一个字都不变 ——
+ * 浏览器会直接拿缓存里的旧图,`<img src>` 也没变化、Vue 不会重新加载。
+ * 表现就是「点了生成没反应:不替换、图库也看不到新的」。加个查询串即可破缓存。
+ */
+const imageVersion = ref(0);
+
 function imageSrc(folder: string, file: string): string {
-  return `/user/images/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`;
+  const base = `/user/images/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`;
+  return imageVersion.value ? `${base}?v=${imageVersion.value}` : base;
 }
 
 async function loadAvatars(): Promise<void> {
@@ -454,6 +464,8 @@ async function generateFor(entry: CharTagEntry): Promise<void> {
     // 头像固定文件名(同名覆盖),不走 saveExternalImage:那张是给楼层/公开接口用的唯一名 + 侧写
     const { base64, format } = await prepareImageForStorage(result);
     await uploadUserImage(`${AVATAR_PREFIX}${entry.name}`, AVATAR_FILE_STEM, base64, format);
+    // 文件是覆盖写的,URL 不变 → 必须换版本号,否则格子还显示缓存里的旧头像
+    imageVersion.value += 1;
     toastr.success('头像已生成', '柏宝绘');
     await loadAvatars();
   } catch (error) {
