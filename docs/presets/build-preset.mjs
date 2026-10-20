@@ -8,7 +8,7 @@
  * 这里直接从源码抽取内置文本再追加分镜增强,保证两者不会漂移。
  *
  * 用法:node docs/presets/build-preset.mjs
- * 输出:docs/presets/分镜导演_ComfyUI_v3.json
+ * 输出:docs/presets/分镜导演_ComfyUI_v4.json
  */
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -44,9 +44,16 @@ const SPEC_ENHANCE = `
 正文对服装的描写不作为款式来源——正文写她穿卫衣而库里没有卫衣,仍然照抄库里那套。
 只有完全没有【服装库】区块、或该角色确实没有可用条目(标注「仅限他人」的不算)时,才按正文写;
 正文也没写就不写服装细节。
+服装库词串里若自带权重(如 (black nightgown:1.1)),原样保留——那是用户自己写的;
+你自己新增的 tag 一律不得使用权重语法。
 男性角色的服装按正文写到部件级(版型 + 主色 + 关键部件),同一状态全楼复用同一份。
 
 【单人 / 多人写法】
+画面里只有一个人时,**人数 tag 必须写全**:1girl, solo(男性写 1boy, solo)。
+这是硬性要求,不是可选项——缺了人数 tag,模型会自由决定画几个人,把同一个人画成两三个。
+人数 tag 放在最前(插件已拼入 LoRA 触发词时,紧跟触发词串之后),其后才是镜头、外貌、服装、动作。
+单人画面禁止出现任何暗示第二个人的 tag:looking at another、2girls、multiple girls、other girl、crowd 一律不写;
+视线只能从 looking at viewer / looking away / looking down / looking up / closed eyes 里选。
 画面里只有一个人时,所有特征、服装、动作、表情一律直接裸写,不要用 "X on Y" 的绑定写法:
 写 silver hair girl smiling 是错的,单人直接写 smile;写 white sweatshirt 就够,不要写 white sweatshirt on silver hair girl。
 两人及以上才需要绑定:把每人的服装、动作、表情绑到该人的发色或瞳色特征词上,避免模型随机分配。
@@ -57,6 +64,12 @@ const SPEC_ENHANCE = `
 角色库里的 LoRA 触发词(如 adnim)、库条目标记([locked]、[lora]: 等)都不是作品名,
 不得写进身份 tag,也不得转义成 \(adnim\) 这种形态——触发词由插件另行拼入提示词,重复写只会污染画面。
 无法从角色卡、世界书或正文可靠确定作品时,按原创角色处理,不写身份 tag。
+
+**带 LoRA 的角色:外貌与身份一律由 LoRA 决定,不写任何身份 tag。**
+触发词串的第一词(如 momoyuko)是 LoRA 的激活词,不是角色名,更不是作品名:
+禁止写成 名字 \(同名\) 这种形态(如 momoyuko \(momoyuko\))——那是把激活词复制成作品名,属于编造。
+作品名与角色名相同不构成任何证据;说不出真实作品名时,一律不写。
+也不要重复触发词串里已经写明的部位特征(发色、瞳色、体型),插件会整串拼入。
 
 【分镜与镜头】
 
@@ -165,7 +178,9 @@ const THINKING_ENHANCE = `
 15 没有权重语法,没有下划线,没有分格标签(multiple views / split screen)。
 16 女性角色的整套服装来自【服装库】且整串照抄,没有自创款式;男性角色的服装写到部件级。
 17 单人画面没有用 "X on Y" 绑定写法;同一张图里没有重复的 tag。
-18 身份 tag 的括号里只有作品名,没有 LoRA 触发词,也没有 [locked] / [lora]: 这类库标记。`;
+18 身份 tag 的括号里只有作品名,没有 LoRA 触发词,也没有 [locked] / [lora]: 这类库标记。
+19 带 LoRA 的角色没有写任何身份 tag,也没有出现「名字 \(同名\)」这种编造形态。
+20 单人画面写了 1girl, solo(或 1boy, solo),且没有任何暗示第二个人的 tag。`;
 
 const spec = (await extractConst('DEFAULT_COMFY_SPEC')) + SPEC_ENHANCE;
 const thinking = (await extractConst('DEFAULT_COMFY_THINKING')) + THINKING_ENHANCE;
@@ -185,7 +200,7 @@ const preset = {
   ],
 };
 
-const outPath = path.join(here, '分镜导演_ComfyUI_v3.json');
+const outPath = path.join(here, '分镜导演_ComfyUI_v4.json');
 await writeFile(outPath, `${JSON.stringify(preset, null, 2)}\n`, 'utf8');
 console.log(`写入 ${path.relative(root, outPath)}`);
 console.log(`comfySpec ${spec.length} 字符 / comfyThinking ${thinking.length} 字符`);
