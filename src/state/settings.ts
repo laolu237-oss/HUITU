@@ -18,6 +18,7 @@ import {
   vibeMetaFromData,
 } from '@/backends/vibeStore';
 import { getContext } from '@/st/context';
+import { normalizePromptPresets, type PromptPreset } from '@/state/promptPreset';
 import { reactive, watch } from 'vue';
 
 /**
@@ -473,6 +474,16 @@ export interface AutoTagSettings {
   libraryFilter?: LibraryFilterMode;
   /** 可编辑提示词集(破限/后端规范/思维链);空串 = 回落内置默认。 */
   prompts: AutoTagPrompts;
+  /**
+   * 提示词预设库(具名快照,见 state/promptPreset.ts)。
+   *
+   * prompts 仍是**唯一生效源**:切换预设只是把快照写进 prompts,
+   * 因此 autoTag/prompt.ts 不需要知道预设的存在,也不会出现两份真相。
+   * 可选字段:旧配置没有该键,normalize 补空数组。
+   */
+  promptPresets?: PromptPreset[];
+  /** 当前预设 id;空串或指向已删条目 = 内置默认(prompts 全空)。 */
+  activePresetId?: string;
 }
 
 /**
@@ -564,7 +575,7 @@ tag（JSON 的 tag 键）：danbooru 短 tag——英文小写、逗号分隔的
 2. 时代与世界观（服饰体系、建筑、器物、环境风格）——**必须先判断，并主动具体化**。
    依据按优先级取：世界设定（世界书）> 角色设定/主角设定 > 正文与上下文中的称谓、身份、器物和环境。
    有明确设定时严格遵循；没有明确设定时，也要根据现有线索和剧情气质，主动选择一个最合理、具体且自洽的时代、文明或原创视觉体系。证据较少时可以合理补全时代风格、服装版型、材质、配饰、光线与色调，但这种发挥只限于“怎么画”，不得借机编造“画面里有什么”。
-   将判断落实到画面实际可见的细节：人物可见时优先完善服装版型、材质和配饰；背景可见时，只补充设定或正文能够支持的建筑、家具、环境和器物。地形、地面或道路材质、天气痕迹及环境状态都属于场景事实，没有依据时保持简洁，不得为了丰富画面自行添加泥地、土路、湿地、积水、积雪、尘土或湿滑地面。
+   将判断落实到画面实际可见的细节：人物可见时只补材质、褶皱与受光表现——服装款式不得自创（女性角色必须从请求里的【服装库】挑一条整串照抄，男性角色按正文已写到的穿着写到部件级，详见任务协议）；背景可见时，只补充设定或正文能够支持的建筑、家具、环境和器物。地形、地面或道路材质、天气痕迹及环境状态都属于场景事实，没有依据时保持简洁，不得为了丰富画面自行添加泥地、土路、湿地、积水、积雪、尘土或湿滑地面。
    正文只确定“野外”时写 outdoors 即可，只确定“森林”时写 forest 即可；只有正文、上下文或世界设定明确支持雨后、泥泞、土路等事实时，才写 muddy ground、dirt path、puddles 等对应 tag。
    架空世界可以采用原创或混合风格，但必须内部统一，不得随意堆叠相互冲突的文明元素；连续场景中保持同一套视觉判断。丰富画面优先依靠镜头、构图、光线、色调和有依据的具体细节，而不是把 hanfu、wuxia、ancient chinese architecture 等相关词机械堆进每张图。
 
@@ -653,7 +664,7 @@ NAI 对 danbooru 体系理解最好：人物多的画面务必写清数量 tag�
 2. 时代与世界观（服饰体系、建筑、器物、环境风格）——**必须先判断，并主动具体化**。
    依据按优先级取：世界设定（世界书）> 角色设定/主角设定 > 正文与上下文中的称谓、身份、器物和环境。
    有明确设定时严格遵循；没有明确设定时，也要根据现有线索和剧情气质，主动选择一个最合理、具体且自洽的时代、文明或原创视觉体系。证据较少时可以合理补全时代风格、服装版型、材质、配饰、光线与色调，但这种发挥只限于“怎么画”，不得借机编造“画面里有什么”。
-   将判断落实到画面实际可见的细节：人物可见时优先完善服装版型、材质和配饰；背景可见时，只补充设定或正文能够支持的建筑、家具、环境和器物。地形、地面或道路材质、天气痕迹及环境状态都属于场景事实，没有依据时保持简洁，不得为了丰富画面自行添加泥地、土路、湿地、积水、积雪、尘土或湿滑地面。
+   将判断落实到画面实际可见的细节：人物可见时只补材质、褶皱与受光表现——服装款式不得自创（女性角色必须从请求里的【服装库】挑一条整串照抄，男性角色按正文已写到的穿着写到部件级，详见任务协议）；背景可见时，只补充设定或正文能够支持的建筑、家具、环境和器物。地形、地面或道路材质、天气痕迹及环境状态都属于场景事实，没有依据时保持简洁，不得为了丰富画面自行添加泥地、土路、湿地、积水、积雪、尘土或湿滑地面。
    正文只确定“野外”时写 outdoors 即可，只确定“森林”时写 forest 即可；只有正文、上下文或世界设定明确支持雨后、泥泞、土路等事实时，才写 muddy ground、dirt path、puddles 等对应 tag。
    架空世界可以采用原创或混合风格，但必须内部统一，不得随意堆叠相互冲突的文明元素；连续场景中保持同一套视觉判断。丰富画面优先依靠镜头、构图、光线、色调和有依据的具体细节，而不是把 hanfu、wuxia、ancient chinese architecture 等相关词机械堆进每张图。
 
@@ -1216,6 +1227,8 @@ function defaults(): ImageSettings {
         naiThinking: '',
         naiV5Thinking: '',
       },
+      promptPresets: [],
+      activePresetId: '',
     },
     excludes: excludesDefaults(),
     storage: { saveAsJpeg: true },
@@ -1793,6 +1806,12 @@ function normalize(raw: unknown): ImageSettings {
     typeof rt.minImages === 'number' && Number.isFinite(rt.minImages)
       ? Math.min(maxImages, Math.max(0, Math.floor(rt.minImages)))
       : d.autoTag.minImages;
+  // 提示词预设:先兜底列表,再校验选中 id —— 悬空 id 会让下拉显示空白,且「保存」写不回任何条目
+  const promptPresets = normalizePromptPresets(rt.promptPresets);
+  const activePresetId =
+    typeof rt.activePresetId === 'string' && promptPresets.some(p => p.id === rt.activePresetId)
+      ? rt.activePresetId
+      : '';
   merged.autoTag = {
     enabled: typeof rt.enabled === 'boolean' ? rt.enabled : d.autoTag.enabled,
     contextMessages:
@@ -1834,6 +1853,9 @@ function normalize(raw: unknown): ImageSettings {
         naiV5Thinking: typeof rp.naiV5Thinking === 'string' ? rp.naiV5Thinking : '',
       };
     })(),
+    // 提示词预设:逐条兜底;选中 id 必须指向存在的预设,删条目后不留悬空 id
+    promptPresets,
+    activePresetId,
   };
   merged.excludes = normalizeExcludes(r.excludes);
   // 存储行为:嵌套对象逐字段兜底(老数据无 storage 键 → 默认关)

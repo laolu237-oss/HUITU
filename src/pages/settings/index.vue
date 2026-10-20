@@ -25,6 +25,17 @@ import {
 import { getContext } from '@/st/context';
 import { downloadTransferFile, importTransferFile } from '@/state/configTransfer';
 import {
+  MAX_PRESETS,
+  buildPromptPresetFile,
+  emptyPrompts,
+  newPresetId,
+  parsePromptPresetFile,
+  presetBackendLabel,
+  presetSlotSummary,
+  promptsEqual,
+  type PromptPreset,
+} from '@/state/promptPreset';
+import {
   ORB_SHAPES,
   THEMES,
   ui,
@@ -203,6 +214,21 @@ const TAG_PROMPT_METAS: TagPromptMeta[] = [
   },
 ];
 
+/**
+ * 列表只显示与当前出图后端匹配的规范与思维链。
+ *
+ * 为什么不硬删 NAI 两条:它们是 settings 里的真实字段,删 UI 不等于删数据 ——
+ * 一旦把出图后端切到 NAI,内置回落仍然生效,用户却再也看不到、也改不了。
+ * 按后端过滤能达到同样的「眼不见为净」,且切回去时能力还在。
+ * 破限词全后端通用,恒显示。
+ */
+const visibleTagPromptMetas = computed<TagPromptMeta[]>(() => {
+  const nai = settings.defaultBackend === 'nai';
+  return TAG_PROMPT_METAS.filter(m =>
+    m.key === 'jailbreak' ? true : m.key.startsWith('nai') === nai,
+  );
+});
+
 // 正在编辑的提示词;draft 是草稿,点「完成」才写回 settings(取消则丢弃)。
 const editingTagPrompt = ref<TagPromptMeta | null>(null);
 const tagPromptDraft = ref('');
@@ -237,6 +263,223 @@ function resetTagPromptDraft() {
 // 点宏标签 → 插入到文本框光标处(无焦点则追加到末尾);光标定位由组件内部处理
 function insertTagMacro(token: string) {
   tagPromptArea.value?.insertAtCursor(token);
+}
+
+/* —— 提示词预设:具名快照 + 导入/导出 ——
+   设计要点:prompts 始终是唯一生效源,切换预设只是把快照写进去,
+   所以 autoTag/prompt.ts 完全不需要知道预设的存在,也不存在两份真相。
+   编辑槽位不会自动回写预设 —— 写回是显式动作(「保存」),否则「先改改看」会污染预设。 */
+const presetMsg = ref('');
+const presetError = ref(false);
+const presetList = computed<PromptPreset[]>(() => settings.autoTag.promptPresets ?? []);
+const activePreset = computed<PromptPreset | null>(
+  () => presetList.value.find(p => p.id === (settings.autoTag.activePresetId ?? '')) ?? null,
+);
+// 「已修改」= 槽位与当前预设不一致;没有当前预设时恒为 false(内置默认没什么可脏的)
+const presetDirty = computed(
+  () => !!activePreset.value && !promptsEqual(activePreset.value.prompts, settings.autoTag.prompts),
+);
+const PRESET_OPTIONS = computed(() => [
+  { value: '', label: '内置默认' },
+  ...presetList.value.map(p => ({ value: p.id, label: p.name })),
+]);
+
+function ensurePresetList(): PromptPreset[] {
+  if (!settings.autoTag.promptPresets) settings.autoTag.promptPresets = [];
+  return settings.autoTag.promptPresets;
+}
+function setPresetMsg(text: string, error = false) {
+  presetMsg.value = text;
+  presetError.value = error;
+}
+function presetBackendMismatch(p: PromptPreset): boolean {
+  return p.backend !== (settings.defaultBackend === 'nai' ? 'nai' : 'comfyui');
+}
+/** 切换预设:整组写入槽位。空 id = 清空槽位回内置默认。 */
+function applyPreset(id: string) {
+  if (!id) {
+    settings.autoTag.prompts = emptyPrompts();
+    settings.autoTag.activePresetId = '';
+    setPresetMsg('已切回内置默认。');
+    return;
+  }
+  const p = presetList.value.find(x => x.id === id);
+  if (!p) return;
+  settings.autoTag.prompts = { ...emptyPrompts(), ...p.prompts };
+  settings.autoTag.activePresetId = p.id;
+  // 口径不符时预设会「导入成功但完全不生效」,必须明说,否则只能靠出图变差反推
+  if (presetBackendMismatch(p)) {
+    setPresetMsg(
+      `已启用「${p.name}」,但它是 ${presetBackendLabel(p.backend)} 口径,当前出图后端不是它,规范不会生效。`,
+      true,
+    );
+  } else {
+    setPresetMsg(`已启用「${p.name}」。`);
+  }
+}
+
+// 切换时若有未写回的改动,先确认 —— 否则改了半天一次下拉就没了
+const pendingPresetId = ref<string | null>(null);
+const presetSwitchOpen = ref(false);
+const presetSel = computed<string>({
+  get: () => settings.autoTag.activePresetId ?? '',
+  set: v => {
+    if (v === (settings.autoTag.activePresetId ?? '')) return;
+    if (presetDirty.value) {
+      pendingPresetId.value = v;
+      presetSwitchOpen.value = true;
+      return;
+    }
+    applyPreset(v);
+  },
+});
+function confirmPresetSwitch() {
+  presetSwitchOpen.value = false;
+  const id = pendingPresetId.value;
+  pendingPresetId.value = null;
+  if (id !== null) applyPreset(id);
+}
+function cancelPresetSwitch() {
+  pendingPresetId.value = null;
+}
+
+function savePreset() {
+  const p = activePreset.value;
+  if (!p) {
+    setPresetMsg('当前是内置默认,没有可写回的预设。请先用「另存为」建一个。', true);
+    return;
+  }
+  p.prompts = { ...settings.autoTag.prompts };
+  setPresetMsg(`已写回预设「${p.name}」。`);
+}
+
+const saveAsOpen = ref(false);
+const saveAsName = ref('');
+function openSaveAs() {
+  saveAsName.value = activePreset.value ? `${activePreset.value.name} 副本` : '我的预设';
+  saveAsOpen.value = true;
+}
+function closeSaveAs() {
+  saveAsOpen.value = false;
+}
+function confirmSaveAs() {
+  const name = saveAsName.value.trim().slice(0, 40);
+  if (!name) return;
+  const list = ensurePresetList();
+  if (list.length >= MAX_PRESETS) {
+    saveAsOpen.value = false;
+    setPresetMsg(`预设数量已达上限(${MAX_PRESETS}),请先删除不用的。`, true);
+    return;
+  }
+  const p: PromptPreset = {
+    id: newPresetId(),
+    name,
+    // 自建预设按当前出图后端口径记账,切换时的「口径不符」提示才准确
+    backend: settings.defaultBackend === 'nai' ? 'nai' : 'comfyui',
+    prompts: { ...settings.autoTag.prompts },
+    basedOn: activePreset.value?.basedOn ?? '',
+    notes: [],
+    createdAt: new Date().toISOString(),
+  };
+  list.push(p);
+  settings.autoTag.activePresetId = p.id;
+  saveAsOpen.value = false;
+  setPresetMsg(`已保存为「${name}」。`);
+}
+
+const deletePresetOpen = ref(false);
+function askDeletePreset() {
+  if (activePreset.value) deletePresetOpen.value = true;
+}
+function confirmDeletePreset() {
+  const p = activePreset.value;
+  deletePresetOpen.value = false;
+  if (!p) return;
+  const list = ensurePresetList();
+  const idx = list.findIndex(x => x.id === p.id);
+  if (idx >= 0) list.splice(idx, 1);
+  // 只解绑、不清空槽位:用户可能只是想「脱离预设继续手改」
+  settings.autoTag.activePresetId = '';
+  setPresetMsg(`已删除预设「${p.name}」,当前提示词保持不变(已变为未保存状态)。`);
+}
+
+function doExportPreset() {
+  const p = activePreset.value;
+  const file = buildPromptPresetFile(
+    p ?? {
+      id: 'current',
+      name: '当前提示词',
+      backend: settings.defaultBackend === 'nai' ? 'nai' : 'comfyui',
+      prompts: { ...settings.autoTag.prompts },
+      basedOn: '',
+      notes: [],
+      createdAt: '',
+    },
+  );
+  const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `柏宝绘预设_${(p?.name ?? '当前提示词').replace(/[\\/:*?"<>|]/g, '_')}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  setPresetMsg('已导出预设文件。');
+}
+
+const presetFileInput = ref<HTMLInputElement | null>(null);
+const pendingPreset = ref<PromptPreset | null>(null);
+const presetImportOpen = ref(false);
+function pickPresetFile() {
+  presetMsg.value = '';
+  presetFileInput.value?.click();
+}
+async function onPresetFile(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = ''; // 复位,允许重复选同一文件
+  if (!file) return;
+  let text = '';
+  try {
+    text = await file.text();
+  } catch {
+    setPresetMsg('文件读取失败,请重试。', true);
+    return;
+  }
+  const r = parsePromptPresetFile(text);
+  if (!r.ok) {
+    setPresetMsg(`导入失败:${r.error}`, true);
+    return;
+  }
+  pendingPreset.value = r.preset;
+  presetImportOpen.value = true;
+}
+function cancelPresetImport() {
+  pendingPreset.value = null;
+}
+function confirmPresetImport() {
+  const p = pendingPreset.value;
+  presetImportOpen.value = false;
+  pendingPreset.value = null;
+  if (!p) return;
+  const list = ensurePresetList();
+  // 同名视为「更新这份预设」,不堆一堆同名条目(导入的意图通常是更新)
+  const same = list.find(x => x.name === p.name);
+  if (same) {
+    same.prompts = p.prompts;
+    same.backend = p.backend;
+    same.basedOn = p.basedOn;
+    same.notes = p.notes;
+    applyPreset(same.id);
+    setPresetMsg(`已更新同名预设「${same.name}」并启用。`);
+    return;
+  }
+  if (list.length >= MAX_PRESETS) {
+    setPresetMsg(`预设数量已达上限(${MAX_PRESETS}),请先删除不用的。`, true);
+    return;
+  }
+  list.push(p);
+  applyPreset(p.id);
+  setPresetMsg(`已导入并启用「${p.name}」。`);
 }
 
 // 排除参数:内部存 string[],编辑时用逗号分隔的单行文本承载,读/写两向转换。
@@ -929,8 +1172,54 @@ async function confirmImport() {
 
       <!-- 自定义提示词(与柏宝书同款入口,独立成区) -->
       <Collapsible title="自定义提示词" :open="false">
+        <!-- 预设:一份快照打包五个槽位。切换即整组写入下方槽位,改槽位不会自动写回 -->
+        <div class="bbi-select-row">
+          <span class="bbi-field-label">提示词预设</span>
+          <BbiSelect v-model="presetSel" :options="PRESET_OPTIONS" aria-label="提示词预设" />
+        </div>
+        <p class="bbi-field-hint">
+          「内置默认」用插件自带的规范与思维链。导入的预设是一份<b>快照</b>:切换时整组写入下方五个槽位,
+          之后改槽位不会自动写回,点「保存」才写回。预设随设置存在服务器,换设备也在。
+        </p>
+
+        <div class="bbi-preset-actions">
+          <button class="bbi-btn bbi-btn-sm" type="button" :disabled="!activePreset" @click="savePreset">
+            <Icon name="check" /> 保存
+          </button>
+          <button class="bbi-btn bbi-btn-sm" type="button" @click="openSaveAs">
+            <Icon name="copy" /> 另存为
+          </button>
+          <button class="bbi-btn bbi-btn-sm bbi-btn-primary" type="button" @click="pickPresetFile">
+            <Icon name="upload" /> 导入
+          </button>
+          <button class="bbi-btn bbi-btn-sm" type="button" @click="doExportPreset">
+            <Icon name="download" /> 导出
+          </button>
+          <button
+            class="bbi-btn bbi-btn-sm bbi-btn-danger"
+            type="button"
+            :disabled="!activePreset"
+            @click="askDeletePreset"
+          >
+            <Icon name="trash" /> 删除
+          </button>
+          <!-- 隐藏的原生文件选择:点「导入」触发,选完即复位(可重复选同一文件) -->
+          <input
+            ref="presetFileInput"
+            class="bbi-transfer-input"
+            type="file"
+            accept=".json,application/json"
+            @change="onPresetFile"
+          />
+        </div>
+
+        <p v-if="presetDirty" class="bbi-field-hint is-warn">当前槽位已改动,尚未写回预设。</p>
+        <p v-if="presetMsg" class="bbi-field-hint" :class="{ 'is-error': presetError }">{{ presetMsg }}</p>
+
+        <hr class="bbi-rule" />
+
         <ul class="bbi-prompt-list">
-          <li v-for="m in TAG_PROMPT_METAS" :key="m.key" class="bbi-prompt-item">
+          <li v-for="m in visibleTagPromptMetas" :key="m.key" class="bbi-prompt-item">
             <button class="bbi-prompt-open" type="button" @click="openTagPrompt(m)">
               <span class="bbi-prompt-name">{{ m.label }}</span>
               <span class="bbi-prompt-state" :class="{ 'is-custom': isTagPromptCustom(m.key) }">
@@ -940,6 +1229,10 @@ async function confirmImport() {
             </button>
           </li>
         </ul>
+        <p class="bbi-field-hint">
+          只显示当前出图后端对应的规范与思维链(破限词全后端通用)。把「出图后端」切到 NAI 时,NAI 那两份才会出现;
+          切回 ComfyUI 就看不到了,内容仍然保留。
+        </p>
       </Collapsible>
 
       <!-- 配置导入导出:整机设置备份/迁移。副 API(渠道 + 指派)不随文件走 -->
@@ -1246,6 +1539,78 @@ async function confirmImport() {
         </footer>
       </div>
     </ModalMask>
+
+    <!-- ===== 另存为预设:只收一个名字,内容取当前五个槽位 ===== -->
+    <ModalMask :open="saveAsOpen" @close="closeSaveAs">
+      <div class="bbi-modal" role="dialog" aria-modal="true" aria-label="另存为预设">
+        <header class="bbi-modal-head">
+          <span class="bbi-modal-title">另存为预设</span>
+          <button class="bbi-icon-mini" type="button" title="关闭" @click="closeSaveAs"><Icon name="close" /></button>
+        </header>
+        <label class="bbi-modal-field">
+          <span class="bbi-modal-label">预设名</span>
+          <input
+            v-model="saveAsName"
+            class="bbi-input"
+            placeholder="如:分镜导演·精简"
+            spellcheck="false"
+            @keydown.enter.prevent="confirmSaveAs"
+          />
+        </label>
+        <p class="bbi-field-hint">保存的是下方五个槽位的当前内容。之后切到别的预设再切回来即可复原。</p>
+        <footer class="bbi-modal-foot">
+          <span class="bbi-modal-foot-spacer"></span>
+          <button class="bbi-btn" type="button" @click="closeSaveAs">取消</button>
+          <button class="bbi-btn bbi-btn-primary" type="button" @click="confirmSaveAs">保存</button>
+        </footer>
+      </div>
+    </ModalMask>
+
+    <!-- 导入预设二次确认:让用户先看清名字、口径、槽位体积,再决定是否覆盖当前提示词 -->
+    <ConfirmDialog
+      v-model:open="presetImportOpen"
+      title="导入提示词预设"
+      confirm-text="导入并启用"
+      confirm-icon="upload"
+      @confirm="confirmPresetImport"
+      @cancel="cancelPresetImport"
+    >
+      <template v-if="pendingPreset">
+        预设名:<b>{{ pendingPreset.name }}</b><br />
+        后端口径:<b>{{ presetBackendLabel(pendingPreset.backend) }}</b><br />
+        槽位:{{ presetSlotSummary(pendingPreset) }}<br />
+        <template v-if="pendingPreset.notes.length">
+          <br />来源说明:<br />
+          <span v-for="(n, i) in pendingPreset.notes" :key="i">· {{ n }}<br /></span>
+        </template>
+        <br />导入后立即启用(整组写入五个槽位),当前提示词会被覆盖。
+      </template>
+    </ConfirmDialog>
+
+    <!-- 删除预设:只解绑,不清空槽位 -->
+    <ConfirmDialog
+      v-model:open="deletePresetOpen"
+      title="删除预设"
+      confirm-text="删除"
+      confirm-icon="trash"
+      tone="danger"
+      @confirm="confirmDeletePreset"
+    >
+      确定删除预设「{{ activePreset?.name || '' }}」吗?五个槽位的当前内容不会被清空,只是不再关联这份预设。
+    </ConfirmDialog>
+
+    <!-- 带未保存改动切换预设:丢弃前确认一次 -->
+    <ConfirmDialog
+      v-model:open="presetSwitchOpen"
+      title="切换预设"
+      confirm-text="丢弃并切换"
+      confirm-icon="refresh"
+      tone="danger"
+      @confirm="confirmPresetSwitch"
+      @cancel="cancelPresetSwitch"
+    >
+      当前槽位有未写回的改动,切换预设会丢弃它们。确定切换吗?
+    </ConfirmDialog>
 
     <ConfirmDialog
       v-model:open="updateConfirmOpen"
@@ -1707,6 +2072,19 @@ async function confirmImport() {
 /* 操作结果提示:出错时转危险色(成功用常规墨色,避免绿色撞「跌」的歧义) */
 .bbi-field-hint.is-error {
   color: var(--bbi-danger);
+}
+/* 未保存提醒:比常规提示重一档,但不抢主操作(用强调色而非危险色) */
+.bbi-field-hint.is-warn {
+  color: var(--bbi-accent);
+  font-weight: 600;
+}
+
+/* —— 提示词预设:操作按钮横排(移动端自动换行),与配置导入导出同款节奏 —— */
+.bbi-preset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 /* ============ 排除名单(chips + 弹窗列表):与柏宝书同款交互,类名换 bbi 前缀 ============ */
