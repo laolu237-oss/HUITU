@@ -193,8 +193,10 @@ describe('generateImage', () => {
     naiReady();
     const characters = [{ name: '阿黛尔', tag: '1girl', nl: '' }];
     await generateImage({ prompt: 'x', characters, seed: 5, size: 'landscape' });
+    // characters 原样透传;prompt 会被补上人数 tag —— 单人且原 tag 无人数/独身 tag 时,
+    // ensureSoloTag 按 characters[].tag 的性别线索补 1girl + solo(见 countTag.ts)
     expect(vi.mocked(generateNaiImage).mock.calls[0][1]).toEqual({
-      prompt: 'x', nl: '', characters, seed: 5, size: 'landscape',
+      prompt: '1girl, solo, x', nl: '', characters, seed: 5, size: 'landscape',
     });
   });
 

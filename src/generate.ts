@@ -28,6 +28,7 @@ import { generateComfyImage, randomSeed, type ComfyImageResult } from '@/backend
 import { generateNaiImage, naiRandomSeed, naiSupportsCharacterPrompts } from '@/backends/nai';
 import { effectiveOrientation, parseSize, pickSize, type Orientation } from '@/backends/size';
 import { collectBoundLoraNames, ensureVerbatimItems, mergeCharacterLoras, resolveCharacterLoras } from '@/characterLora';
+import { ensureSoloTag } from '@/countTag';
 import { acquireNaiSlot } from '@/floor/genQueue';
 import type { GenerationMeta } from '@/generationMeta';
 import { charTagLib } from '@/state/charTags';
@@ -209,7 +210,18 @@ export async function generateImage(
         effectiveNai(),
         // characters 原样透传:不支持的模型由 buildNaiParameters 自己滤掉(同一口径
         // naiSupportsCharacterPrompts),在这儿再滤一遍只会多一处会漂的判据
-        { prompt: input.prompt, nl: input.nl ?? '', characters, seed: input.seed, size },
+        {
+          // 人数 tag 兜底:确知只有一个人却没写人数时补 1girl/1boy + solo(见 countTag.ts)
+          prompt: ensureSoloTag(input.prompt, {
+            characterCount: characters.length,
+            // NAI 的性别信息在 characters[].tag 里,Base tag 可能一个性别词都没有
+            hintText: characters.map(character => character.tag).join(', '),
+          }),
+          nl: input.nl ?? '',
+          characters,
+          seed: input.seed,
+          size,
+        },
         signal,
         { onRetry: info => progress.onRetry?.({ attempt: info.attempt, max: info.max }) },
       );
@@ -237,8 +249,16 @@ export async function generateImage(
           : conn;
       // 触发词串必须完整进入提示词:卡片路径在写回时已补齐(幂等,这里不会重复),
       // 公开接口路径没有写回环节,由这里兜底补齐。
+      //
+      // 人数 tag 兜底要在补齐之前做:只有确知「本图一个人」(names 长度为 1)才动手,
+      // 拿不到证据时一律不补——给双人画面补 solo 会把两个人挤成一个,比漏画更糟。
+      const soloTag = ensureSoloTag(input.prompt, {
+        characterCount: input.characterNames?.length,
+        // 触发词要留在最前,人数 tag 插它后面
+        triggerToken: resolved.sources.find(source => source.prependFirst)?.text.split(',')[0]?.trim(),
+      });
       const prompt =
-        conn.mode === 'simple' ? ensureVerbatimItems(input.prompt, resolved.sources) : input.prompt;
+        conn.mode === 'simple' ? ensureVerbatimItems(soloTag, resolved.sources) : soloTag;
       result = await generateComfyImage(
         runConn,
         {
