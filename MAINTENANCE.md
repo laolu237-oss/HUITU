@@ -14,6 +14,9 @@ HUITU（柏宝绘）是 SillyTavern（酒馆）的**剧情配图扩展（插件�
 - 技术栈：Vue 3 + TypeScript + Vite；vitest 单元测试；产物 `dist/index.js` + `dist/index.css`。
 - 当前开发分支：`feat/character-lora`，迭代到 **v0.3.23**（清理后，详见 §7）。
 - 仓根已有 `README.md` / `architecture.md` / `DESIGN.md` / `PUBLIC_API.md`，先读 `architecture.md` 的任务定位索引。
+- 提示词预设的对外说明书在 `文生图转换说明书/`，**只在那里维护**（用户会把它单独发给外部 AI）。
+- **每次改动都要在 `更新文档/` 新增一篇**（格式见 `更新文档/README.md`）。那是跨 AI 交接的事实来源：
+  改了什么、为什么、怎么验证、还剩什么。不要只改代码不记账。
 
 ---
 
@@ -62,6 +65,11 @@ HUITU（柏宝绘）是 SillyTavern（酒馆）的**剧情配图扩展（插件�
 
 **可靠判据**：只删「在 `name=` / `icon:` / `confirm-icon=` / 页 `id:` 字面量里零出现，且不属上述动态集」的图标。
 （血泪教训：曾用 tsconfig 临时开 `noUnusedLocals` + 正则扫图标，把 `backend/characters/settings/star` 全误报为未用。）
+
+**模板 ref 同名导入同样会被误判为未用**：`App.vue` 的 `<div ref="modalHost">` 靠导入同名 ref 自动绑定，
+脚本里没有任何引用 —— 静态扫描会把它当死代码删掉，后果是所有弹窗 Teleport 宿主为 `null`、
+退化为原地渲染，聊天侧确认窗落在 `.bbi-root` 外、主题变量取不到、背景全透明（v0.3.23 清理时踩过，
+v0.3.26 修复）。**删任何「未用导入」前，先 grep 模板里的 `ref="名字"`。**
 
 ### 4.2 删 CSS 类（`<style scoped>` 里的 `.bbi-*`）
 删前先 grep 该类名在 `class=` / `:class=` / `:deep(...)` 中的出现次数，**含复合选择器与动态拼接**：
