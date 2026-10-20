@@ -8,7 +8,7 @@
  * 这里直接从源码抽取内置文本再追加分镜增强,保证两者不会漂移。
  *
  * 用法:node docs/presets/build-preset.mjs
- * 输出:docs/presets/分镜导演_ComfyUI_v2.json
+ * 输出:docs/presets/分镜导演_ComfyUI_v3.json
  */
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -45,6 +45,18 @@ const SPEC_ENHANCE = `
 只有完全没有【服装库】区块、或该角色确实没有可用条目(标注「仅限他人」的不算)时,才按正文写;
 正文也没写就不写服装细节。
 男性角色的服装按正文写到部件级(版型 + 主色 + 关键部件),同一状态全楼复用同一份。
+
+【单人 / 多人写法】
+画面里只有一个人时,所有特征、服装、动作、表情一律直接裸写,不要用 "X on Y" 的绑定写法:
+写 silver hair girl smiling 是错的,单人直接写 smile;写 white sweatshirt 就够,不要写 white sweatshirt on silver hair girl。
+两人及以上才需要绑定:把每人的服装、动作、表情绑到该人的发色或瞳色特征词上,避免模型随机分配。
+同一个 tag 在一张图里只出现一次,不得重复(如 long hair 写一次就够,不要开头一次、末尾又一次)。
+
+【身份 tag 与 LoRA 触发词】
+身份 tag 的括号里**只能是作品名**:写 character name \(copyright name\)。
+角色库里的 LoRA 触发词(如 adnim)、库条目标记([locked]、[lora]: 等)都不是作品名,
+不得写进身份 tag,也不得转义成 \(adnim\) 这种形态——触发词由插件另行拼入提示词,重复写只会污染画面。
+无法从角色卡、世界书或正文可靠确定作品时,按原创角色处理,不写身份 tag。
 
 【分镜与镜头】
 
@@ -151,7 +163,9 @@ const THINKING_ENHANCE = `
 13 分级与画面内容相符;涉及裸露或性行为的角色是成年人。
 14 没有质量词、画师、年份、负面词(由插件与工作流添加)。
 15 没有权重语法,没有下划线,没有分格标签(multiple views / split screen)。
-16 女性角色的整套服装来自【服装库】且整串照抄,没有自创款式;男性角色的服装写到部件级。`;
+16 女性角色的整套服装来自【服装库】且整串照抄,没有自创款式;男性角色的服装写到部件级。
+17 单人画面没有用 "X on Y" 绑定写法;同一张图里没有重复的 tag。
+18 身份 tag 的括号里只有作品名,没有 LoRA 触发词,也没有 [locked] / [lora]: 这类库标记。`;
 
 const spec = (await extractConst('DEFAULT_COMFY_SPEC')) + SPEC_ENHANCE;
 const thinking = (await extractConst('DEFAULT_COMFY_THINKING')) + THINKING_ENHANCE;
@@ -171,7 +185,7 @@ const preset = {
   ],
 };
 
-const outPath = path.join(here, '分镜导演_ComfyUI_v2.json');
+const outPath = path.join(here, '分镜导演_ComfyUI_v3.json');
 await writeFile(outPath, `${JSON.stringify(preset, null, 2)}\n`, 'utf8');
 console.log(`写入 ${path.relative(root, outPath)}`);
 console.log(`comfySpec ${spec.length} 字符 / comfyThinking ${thinking.length} 字符`);
