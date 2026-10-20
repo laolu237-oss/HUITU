@@ -5,15 +5,15 @@
  * 因此手机UI 那边改/删/清空,这边自动跟着变,不存在两份数据打架。
  *
  * 为什么做成「影子」而不是「导入」:
- * 之前点「一键导入手机UI」是把手机UI 的快照 upsert 进**全局库**(跨聊天),
+ * 之前点「一键导入手机UI」是把手机UI 的快照 upsert 进**跨聊天的库**,
  * 而手机UI 的缓存是 chatMetadata(**按聊天**)——一部聊天的角色被固化进跨聊天的库,
  * 攒几次就变成几十条永远不删的拷贝(现场:66 条)。影子层把作用域还回去:
- * 手机UI 的角色只出现在「本聊天角色」里,换聊天自动换一套。
+ * 手机UI 的角色只出现在「手机UI 角色形象」分区里,换聊天自动换一套。
  *
  * 界面口径(见 更新文档/2026-10-20-*):
- * - 全部并入「本聊天角色」分区,带「手机UI」徽标、只读;
- * - **全局库已有的同名角色一律跳过**(全局是用户手动固定的,不能被影子盖住,
- *   也不允许复制成本聊天副本——那会让固定失效);
+ * - 作为「手机UI 角色形象」分区单独列出,带「手机UI/只读」徽标;
+ * - **角色库已有的同名角色一律跳过**(库里是用户手工固定的,不能被影子盖住,
+ *   也不允许复制成副本——那会让固定失效);
  * - 影子条目锁定,AI 的 changes 一律不收(且 2026-10-20 起 changes 已整体关闭)。
  */
 
@@ -33,7 +33,7 @@ import { globalCharTagLib } from '@/state/globalCharTags';
 import { reactive } from 'vue';
 
 interface PhoneCharTagState {
-  /** 已排除「全局库同名」之后、真正要显示在「本聊天角色」里的影子条目。 */
+  /** 已排除「角色库同名」之后、真正要显示在「手机UI 角色形象」分区里的影子条目。 */
   entries: CharTagEntry[];
   meta: Record<string, PhoneRoleMeta>;
   origin: PhoneRoleOrigin | null;
@@ -41,7 +41,7 @@ interface PhoneCharTagState {
   enabled: boolean;
   /** 上次真正读到数据的时间戳(0 = 从没读到过)。 */
   updatedAt: number;
-  /** 手机UI 有、但因全局库同名被跳过的条数(界面用它解释「为什么少了几个人」)。 */
+  /** 手机UI 有、但因角色库同名被跳过的条数(界面用它解释「为什么少了几个人」)。 */
   skippedByGlobal: number;
   /** 一句人话的来源说明,直接显示在状态条上。 */
   originLabel: string;
@@ -99,11 +99,6 @@ export function refreshPhoneCharTags(force = false): boolean {
   return changed;
 }
 
-/** 影子库当前的名字集(界面判断「这条是手机UI 的、只读」)。 */
-export function phoneCharTagNames(): ReadonlySet<string> {
-  return new Set(phoneCharTagLib.entries.map(entry => entry.name));
-}
-
 /**
  * 启动接线:注入派生库来源 + 跟随切聊天刷新 + 先读一次。
  * 必须在 `bindCharTagSync()` 之前调用——首次重算就要带上影子条目。
@@ -139,7 +134,7 @@ export function resetPhoneCharTags(): void {
   });
 }
 
-/** 派生库重算:影子条目进了种子链,内容一变就要重放一次(与全局库同口径)。 */
+/** 派生库重算:影子条目进了种子链,内容一变就要重放一次(与角色库同口径)。 */
 function notifyReseed(): void {
   recomputeCharTags();
 }

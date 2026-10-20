@@ -31,12 +31,6 @@ export function summarizeLegacyChatCharTags(): LegacyChatTagSummary {
   return { base: base.length, floorOnly };
 }
 
-/** 旧数据是否还有东西可处理(界面据此决定要不要显示提示条)。 */
-export function hasLegacyChatCharTags(): boolean {
-  const summary = summarizeLegacyChatCharTags();
-  return summary.base > 0 || summary.floorOnly > 0;
-}
-
 /**
  * 把旧本聊天基线并入全局(同名跳过),然后清空旧层。
  * @returns moved=新并入的条数;skipped=全局已有同名而跳过的条数。

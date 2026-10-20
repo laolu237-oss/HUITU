@@ -274,7 +274,8 @@ export function parsePromptPresetFile(text: string): PresetParseResult {
       issues.push(`槽位「${k}」出现 {{nl}} 宏(只允许出现在 comfySpec)`);
     }
     if (nlMacro > 1) issues.push(`槽位「${k}」的 {{nl}} 宏出现 ${nlMacro} 次(最多 1 次)`);
-    (prompts as Record<string, string>)[k] = val;
+    // 上面已用 PRESET_PROMPT_KEYS 校验过 k,这里直接按联合键写入(不再需要 as 断言)
+    prompts[k as PresetPromptKey] = val;
   }
 
   if (!hasAnyPrompt(prompts)) {

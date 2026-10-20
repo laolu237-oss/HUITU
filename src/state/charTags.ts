@@ -148,12 +148,10 @@ interface CharTagStore {
 }
 
 export const charTagLib = reactive<{ entries: CharTagEntry[] }>({ entries: [] });
-/** 本聊天基线(手动层)里的名字,响应式——UI 用它判断「本聊天覆盖全局」。随 recompute 同步。 */
-export const charTagBaseNames = reactive<Set<string>>(new Set());
 let baseEntries: CharTagEntry[] = [];
 
 /**
- * 全局角色库(跨聊天)的条目来源,由 globalCharTags.ts 启动时注入。
+ * 角色库(跨聊天)的条目来源,由 globalCharTags.ts 启动时注入。
  * 走注入而不是 import:全局模块要用这里的 normalize/CRUD,直接互转会成模块环。
  */
 let globalCharTagSource: () => CharTagEntry[] = () => [];
@@ -537,13 +535,8 @@ export function charTagsBeforeFloor(_floor: number): CharTagEntry[] {
   return externalCharTagEntries().map(cloneEntry);
 }
 
-export function makeCharTagFloorDelta(ops: CharTagAutoOp[], swipe: number): CharTagFloorDelta | undefined {
-  return ops.length ? { v: 1, swipe, ops } : undefined;
-}
-
 export function recomputeCharTags(): void {
   charTagLib.entries = externalCharTagEntries().map(cloneEntry);
-  charTagBaseNames.clear();
 }
 
 export function hydrateCharTags(): void {
@@ -551,17 +544,6 @@ export function hydrateCharTags(): void {
   // 本聊天层已不参与派生,这里读它只为「旧数据迁移/清理」有据可依(见 charMigration.ts)。
   baseEntries = normalizeCharTagStore(raw);
   recomputeCharTags();
-}
-
-function persistBase(): void {
-  const context = getContext();
-  if (!context?.chatMetadata) return;
-  const store: CharTagStore = {
-    version: 3,
-    entries: baseEntries.map(cloneEntry),
-  };
-  context.chatMetadata[META_KEY] = store;
-  context.saveMetadataDebounced?.();
 }
 
 function stripOpsFromExtra(extra: Record<string, unknown> | undefined, names: Set<string>): boolean {
@@ -616,10 +598,7 @@ export function findCharTag(name: string): CharTagEntry | undefined {
  * setCharTagsFavoriteByNames / rollbackCharTag)已随该层下线删除:
  * 角色库只由 state/globalCharTags 维护,手机UI 影子只读。 */
 
-/* ============ 旧「本聊天层」(已下线,只留给迁移/清理) ============
-
-/** 旧本聊天库的 chatMetadata 键名(迁移/清空时外部模块要用)。 */
-export const CHAR_TAG_META_KEY = META_KEY;
+/* ============ 旧「本聊天层」(已下线,只留给迁移/清理) ============ */
 
 /** 读旧本聊天基线。与派生库无关,仅供迁移/清理统计。 */
 export function readChatCharTagBase(): CharTagEntry[] {

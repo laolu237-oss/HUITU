@@ -17,8 +17,6 @@ import {
   charFieldsEmpty,
   charTagLib,
   emptyCharFields,
-  findCharTag,
-  type CharTagChangeRecord,
   type CharTagEntry,
   type CharTagField,
   type CharTagLora,
@@ -2888,9 +2886,6 @@ function confirmClearAll(): void {
 @media (max-width: 640px) {
   .bbi-char-form--grid {
     grid-template-columns: 1fr;
-  }
-  .bbi-char-name {
-    font-size: 14px;
   }
   /* 窄屏放不下词串预览,行里只留名称 + 归属;全文在展开的表单里看 */
   .bbi-closet-tags {
